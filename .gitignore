@@ -1,0 +1,11 @@
+# python bits
+__pycache__
+ttygeist.egg-info
+
+# app bits
+config.yaml
+ttygeist.log
+
+# emacs bits
+.#*
+*.*#
