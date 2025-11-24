@@ -86,8 +86,7 @@ def create_mcp_server(cfg: Config) -> FastMCP:
     # Create FastMCP server
     mcp = FastMCP(config.data['server']['name'])
 
-    logging.critical(f"!!! MCP SERVER CREATED: {mcp}")
-    logging.critical(f"!!! About to register tools...")
+    logging.info("MCP server instance created; registering tools")
 
     # Register tools in specified order
 
@@ -346,7 +345,7 @@ def create_mcp_server(cfg: Config) -> FastMCP:
         Returns:
             Dictionary with write status and bytes written
         """
-        logging.critical(f"!!! serial_write ENTRY - data_len={len(data)}, add_newline={add_newline}")
+        logging.debug(f"serial_write entry data_len={len(data)}, add_newline={add_newline}")
         try:
             logging.info(f"serial_write called: data_len={len(data)}, add_newline={add_newline}")
             result = await asyncio.wait_for(
@@ -385,8 +384,7 @@ def create_mcp_server(cfg: Config) -> FastMCP:
                 'port_connected': False
             }
 
-    logging.critical(f"!!! ALL TOOLS REGISTERED")
-    logging.critical(f"!!! MCP tools list: {list(mcp._tools.keys()) if hasattr(mcp, '_tools') else 'NO _tools ATTRIBUTE'}")
+    logging.info("Tools registered: serial_read, serial_status, buffer_clear, buffer_inspect, serial_reconnect, serial_write")
 
     return mcp
 
@@ -414,98 +412,56 @@ def main():
     logging.info(f"Server: https://{cfg.server_host}:{cfg.server_port}")
     logging.info("=" * 60)
 
-    # Validate API keys
-    if not cfg.api_keys:
-        logging.error("No API keys configured! Server will reject all requests.")
-        logging.error("Add keys to config file or set TTYGEIST_API_KEYS environment variable")
+    # Validate API keys / anon mode
+    if not cfg.api_keys and not cfg.allow_anon:
+        logging.error("No API keys configured and anonymous access disabled. Server will not start.")
+        logging.error("Add keys to config file or set TTYGEIST_API_KEYS, or enable allow_anon for local dev.")
         return
-
-    logging.info(f"Configured with {len(cfg.api_keys)} API key(s)")
+    if not cfg.api_keys and cfg.allow_anon:
+        logging.warning("Starting in anonymous mode (no auth middleware). Do NOT use in production.")
+    else:
+        logging.info(f"Configured with {len(cfg.api_keys)} API key(s)")
 
     # Create MCP server
     mcp = create_mcp_server(cfg)
 
     # Create MCP HTTP app with streamable transport at root path
-    # Use http_app() with path='/' and pass middleware to http_app
-    from starlette.middleware import Middleware
+    mcp_app = mcp.http_app(path='/')
 
-    # Create middleware list for MCP app
-    middleware = [
-        Middleware(
-            APIKeyAuthMiddleware,
+    # Wrap with auth middleware unless anonymous mode.
+    asgi_app = mcp_app
+    if cfg.api_keys and not cfg.allow_anon:
+        from ttygeist.auth import APIKeyAuthASGIMiddleware
+        asgi_app = APIKeyAuthASGIMiddleware(
+            asgi_app,
             api_keys=cfg.api_keys,
-            header_name=cfg.auth_header_name
+            header_name=cfg.auth_header_name,
         )
-    ]
+        logging.info(f"Auth middleware enabled using header '{cfg.auth_header_name}'")
+    else:
+        logging.info("Auth middleware disabled")
 
-    # Try WITHOUT middleware first to see if that's the issue
-    logging.critical(f"!!! Creating http_app WITHOUT middleware to test...")
-    mcp_app = mcp.http_app(path='/')  # No middleware for now
-    logging.critical(f"!!! If this works, we'll add auth back differently")
-    logging.critical(f"!!! MCP app created: {mcp_app}")
-    logging.critical(f"!!! MCP app lifespan: {mcp_app.lifespan}")
+    # Optional lightweight request logging
+    if cfg.request_log_enabled and cfg.log_level.upper() == 'DEBUG':
+        import types
+        async def request_logger(scope, receive, send):
+            if scope.get('type') == 'http':
+                logging.debug(f"HTTP {scope.get('method')} {scope.get('path')}")
+            return await asgi_app(scope, receive, send)
+        asgi_app = request_logger
+        logging.debug("Request logging middleware active")
 
-    # Debug: Check if we can list tools through the MCP instance
-    try:
-        # Try to call the internal list_tools method if it exists
-        if hasattr(mcp, 'list_tools'):
-            logging.critical(f"!!! mcp.list_tools exists, attempting to call...")
-        if hasattr(mcp, '_server'):
-            logging.critical(f"!!! mcp._server exists: {mcp._server}")
-            if hasattr(mcp._server, '_tool_manager'):
-                logging.critical(f"!!! mcp._server._tool_manager exists: {mcp._server._tool_manager}")
-            # Try to get the tool list from the server
-            if hasattr(mcp._server, 'list_tools'):
-                logging.critical(f"!!! Calling mcp._server.list_tools()...")
-                import inspect
-                if inspect.iscoroutinefunction(mcp._server.list_tools):
-                    # Can't await here, just log that it exists
-                    logging.critical(f"!!! mcp._server.list_tools is async, can't call from sync context")
-                else:
-                    tools = mcp._server.list_tools()
-                    logging.critical(f"!!! Tools from _server.list_tools(): {tools}")
-    except Exception as e:
-        logging.critical(f"!!! Error inspecting MCP internals: {e}", exc_info=True)
-
-    # Create simple Starlette app WITHOUT additional middleware wrapping
-    from starlette.applications import Starlette
-    from starlette.routing import Mount
-    from starlette.requests import Request
-    from starlette.responses import Response
-
-    # Add request logging middleware class to see what's hitting the server
-    from starlette.middleware.base import BaseHTTPMiddleware
-
-    class RequestLoggingMiddleware(BaseHTTPMiddleware):
-        async def dispatch(self, request: Request, call_next):
-            logging.critical(f"!!! INCOMING REQUEST: {request.method} {request.url.path}")
-            logging.critical(f"!!! HEADERS: {dict(request.headers)}")
-
-            # DO NOT read the request body - it consumes the stream!
-            # The MCP handler needs to read it
-
-            try:
-                response = await call_next(request)
-                logging.critical(f"!!! RESPONSE STATUS: {response.status_code}")
-                return response
-            except Exception as e:
-                logging.critical(f"!!! EXCEPTION IN REQUEST HANDLER: {e}", exc_info=True)
-                raise
-
-    # According to FastMCP docs, we should mount the mcp_app and use its lifespan
-    # https://github.com/jlowin/fastmcp/blob/main/docs/deployment/http.mdx
     from starlette.applications import Starlette
     from starlette.routing import Mount
 
     app = Starlette(
         routes=[
-            Mount("/", app=mcp_app),
+            Mount('/', app=asgi_app),
         ],
-        lifespan=mcp_app.lifespan,  # CRITICAL: Use mcp_app's lifespan!
-        middleware=[Middleware(RequestLoggingMiddleware)]
+        lifespan=mcp_app.lifespan,
     )
 
-    logging.critical(f"!!! Mounted mcp_app at / with proper lifespan")
+    logging.info("HTTP server application assembled and mounted at /")
 
     try:
         # Run server with TLS

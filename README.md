@@ -30,8 +30,40 @@ Please see `config.example.yaml` for full suite configuration options.
 Currently supported overrides (from config.py):
 - TTYGEIST_API_KEYS: comma‑separated list of API keys appended to auth.api_keys.
 - TTYGEIST_PORT: overrides serial.port.
+- TTYGEIST_AUTH_HEADER: override auth.header_name ("X-API-Key" or "Authorization").
+- TTYGEIST_ALLOW_ANON: set to 1/true/yes to disable auth middleware (NOT for production).
+- TTYGEIST_REQUEST_LOG: set to 1/true/yes to enable per-request DEBUG logging.
 
 (Additional overrides can be added; none other are presently implemented.)
+
+## Authentication
+
+By default all HTTP access requires an API key.
+
+Configure one or more keys in config.yaml under auth.api_keys or via TTYGEIST_API_KEYS (comma separated).
+
+Two header styles are supported:
+1. X-API-Key: <key>
+2. Authorization: Bearer <key> (set auth.header_name to "Authorization" or export TTYGEIST_AUTH_HEADER=Authorization)
+
+Example (custom header):
+```bash
+curl -s -k \
+  -H 'X-API-Key: your-api-key-1' \
+  https://127.0.0.1:8443/
+```
+
+Example (Bearer):
+```bash
+curl -s -k \
+  -H 'Authorization: Bearer your-api-key-1' \
+  https://127.0.0.1:8443/
+```
+
+Anonymous access
+----------------
+Set allow_anon: true (or export TTYGEIST_ALLOW_ANON=1) to run without auth middleware for local development. Do NOT enable in any untrusted environment.
+
 
 ## CLI Usage (ttygeist-cli)
 

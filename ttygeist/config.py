@@ -39,7 +39,7 @@ class Config:
                 'overflow': 'fifo',
             },
             'server': {
-                'host': '0.0.0.0',
+                'host': '127.0.0.1',
                 'port': 8443,
                 'tls_cert': 'cert.pem',
                 'tls_key': 'key.pem',
@@ -51,10 +51,12 @@ class Config:
                 'format': '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
                 'max_size_mb': 50,
                 'backup_count': 3,
+                'request_log': False,
             },
             'auth': {
                 'api_keys': [],
                 'header_name': 'X-API-Key',
+                'allow_anon': False,
             },
             'socket': {
                 'path': '~/tmp/ttygeist-{pid}.sock',
@@ -72,6 +74,20 @@ class Config:
         # Serial port override
         if 'TTYGEIST_PORT' in os.environ:
             self.data['serial']['port'] = os.environ['TTYGEIST_PORT']
+
+        # Auth header override
+        if 'TTYGEIST_AUTH_HEADER' in os.environ:
+            self.data['auth']['header_name'] = os.environ['TTYGEIST_AUTH_HEADER']
+
+        # Allow anonymous override ("1", "true", "yes")
+        if 'TTYGEIST_ALLOW_ANON' in os.environ:
+            val = os.environ['TTYGEIST_ALLOW_ANON'].strip().lower()
+            self.data['auth']['allow_anon'] = val in {"1", "true", "yes"}
+
+        # Request logging override
+        if 'TTYGEIST_REQUEST_LOG' in os.environ:
+            val = os.environ['TTYGEIST_REQUEST_LOG'].strip().lower()
+            self.data['logging']['request_log'] = val in {"1", "true", "yes"}
 
     @property
     def serial_port(self) -> str:
@@ -160,6 +176,14 @@ class Config:
     @property
     def api_keys(self) -> List[str]:
         return self.data['auth']['api_keys']
+
+    @property
+    def allow_anon(self) -> bool:
+        return self.data['auth'].get('allow_anon', False)
+
+    @property
+    def request_log_enabled(self) -> bool:
+        return self.data['logging'].get('request_log', False)
 
     @property
     def auth_header_name(self) -> str:
