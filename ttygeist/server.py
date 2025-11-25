@@ -397,6 +397,11 @@ def main():
         default='config.yaml',
         help='Path to configuration file (default: config.yaml)'
     )
+    parser.add_argument(
+        '--transport',
+        choices=['http', 'stdio'],
+        help='Override transport (http or stdio)'
+    )
     args = parser.parse_args()
 
     # Load configuration
@@ -409,23 +414,47 @@ def main():
     logging.info("Starting ttygeist")
     logging.info(f"Serial Port: {cfg.serial_port}")
     logging.info(f"Baud Rate: {cfg.serial_baudrate}")
-    logging.info(f"Server: https://{cfg.server_host}:{cfg.server_port}")
+    logging.info(f"Transport: {cfg.server_transport}")
+    if cfg.server_transport == 'http':
+        logging.info(f"Server: https://{cfg.server_host}:{cfg.server_port}")
     logging.info("=" * 60)
 
-    # Validate API keys / anon mode
-    if not cfg.api_keys and not cfg.allow_anon:
-        logging.error("No API keys configured and anonymous access disabled. Server will not start.")
-        logging.error("Add keys to config file or set TTYGEIST_API_KEYS, or enable allow_anon for local dev.")
-        return
-    if not cfg.api_keys and cfg.allow_anon:
-        logging.warning("Starting in anonymous mode (no auth middleware). Do NOT use in production.")
+    # Resolve transport preference (CLI > env > config already applied for env)
+    transport_override = args.transport
+    transport = transport_override or cfg.server_transport
+    transport = transport.lower()
+
+    # Validate API keys / anon mode (HTTP only)
+    if transport == 'http':
+        if not cfg.api_keys and not cfg.allow_anon:
+            logging.error("No API keys configured and anonymous access disabled. Server will not start.")
+            logging.error("Add keys to config file or set TTYGEIST_API_KEYS, or enable allow_anon for local dev.")
+            return
+        if not cfg.api_keys and cfg.allow_anon:
+            logging.warning("Starting in anonymous mode (no auth middleware). Do NOT use in production.")
+        else:
+            logging.info(f"Configured with {len(cfg.api_keys)} API key(s)")
     else:
-        logging.info(f"Configured with {len(cfg.api_keys)} API key(s)")
+        logging.info("STDIO transport selected; HTTP auth settings ignored")
 
     # Create MCP server
     mcp = create_mcp_server(cfg)
 
-    # Create MCP HTTP app with streamable transport at root path
+    if transport == 'stdio':
+        logging.info("Starting ttygeist via stdio transport")
+        try:
+            mcp.run()
+        except KeyboardInterrupt:
+            logging.info("Received shutdown signal (stdio)")
+        finally:
+            if socket_server:
+                socket_server.stop()
+            if serial_manager:
+                serial_manager.stop()
+            logging.info("ttygeist Server stopped")
+        return
+
+    # HTTP path remains unchanged
     mcp_app = mcp.http_app(path='/')
 
     # Wrap with auth middleware unless anonymous mode.
@@ -443,7 +472,6 @@ def main():
 
     # Optional lightweight request logging
     if cfg.request_log_enabled and cfg.log_level.upper() == 'DEBUG':
-        import types
         async def request_logger(scope, receive, send):
             if scope.get('type') == 'http':
                 logging.debug(f"HTTP {scope.get('method')} {scope.get('path')}")
@@ -464,7 +492,6 @@ def main():
     logging.info("HTTP server application assembled and mounted at /")
 
     try:
-        # Run server with TLS
         import uvicorn
         uvicorn.run(
             app,
@@ -477,12 +504,11 @@ def main():
     except KeyboardInterrupt:
         logging.info("Received shutdown signal")
     finally:
-        # Cleanup
         if socket_server:
             socket_server.stop()
         if serial_manager:
             serial_manager.stop()
-        logging.info("Serial MCP Server stopped")
+        logging.info("ttygeist Server stopped")
 
 
 if __name__ == '__main__':

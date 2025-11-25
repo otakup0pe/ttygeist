@@ -30,11 +30,17 @@ buffer:
   overflow: "fifo"
 
 server:
-  # Server binding
+  # Server name (used by MCP client identification)
+  name: ttygeist
+
+  # Transport: "http" or "stdio" (default: http)
+  transport: http
+
+  # HTTP(S) binding (ignored for stdio transport)
   host: 0.0.0.0
   port: 8443
 
-  # TLS configuration
+  # TLS configuration (only for http transport)
   tls_cert: "~/.config/yopo/tls/server.crt"
   tls_key: "~/.config/yopo/tls/server.key"
 
@@ -59,12 +65,18 @@ logging:
   # Number of backup files to keep
   backup_count: 3
 
+  # Enable per-request DEBUG logging (only useful during troubleshooting)
+  request_log: false
+
 auth:
   # CSV List of valid API keys
-  # Keys can be provided here or via SERIAL_MCP_API_KEYS env var
+  # Keys can be provided here or via TTYGEIST_API_KEYS env var
   api_keys:
     - "your-api-key-1"
     - "your-api-key-2"
 
   # Header name for API key (use "Authorization" for "Bearer <key>" format)
   header_name: "X-API-Key"
+
+  # Allow anonymous access (disables auth middleware). Default false.
+  allow_anon: false

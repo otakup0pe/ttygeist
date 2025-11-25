@@ -13,6 +13,13 @@ The use of [uv](https://docs.astral.sh/uv/) is recommended because it is the bee
 ```bash
 $ cd ~/src/otakup0pe-ttygeist
 $ uv sync
+$ uv run ttygeist            # HTTP(S) mode (default)
+$ uv run ttygeist -- --transport stdio   # STDIO mode
+```
+
+Environment override alternative:
+```bash
+$ export TTYGEIST_TRANSPORT=stdio
 $ uv run ttygeist
 ```
 
@@ -28,11 +35,12 @@ Please see `config.example.yaml` for full suite configuration options.
 ### Environment Variable Overrides
 
 Currently supported overrides (from config.py):
-- TTYGEIST_API_KEYS: comma‑separated list of API keys appended to auth.api_keys.
-- TTYGEIST_PORT: overrides serial.port.
-- TTYGEIST_AUTH_HEADER: override auth.header_name ("X-API-Key" or "Authorization").
-- TTYGEIST_ALLOW_ANON: set to 1/true/yes to disable auth middleware (NOT for production).
-- TTYGEIST_REQUEST_LOG: set to 1/true/yes to enable per-request DEBUG logging.
+- `TTYGEIST_API_KEYS`: comma‑separated list of API keys appended to auth.api_keys.
+- `TTYGEIST_PORT`: overrides serial.port.
+- `TTYGEIST_AUTH_HEADER`: override auth.header_name ("X-API-Key" or "Authorization").
+- `TTYGEIST_ALLOW_ANON`: set to 1/true/yes to disable auth middleware (NOT for production).
+- `TTYGEIST_REQUEST_LOG`: set to 1/true/yes to enable per-request DEBUG logging.
+- `TTYGEIST_TRANSPORT`: set to "http" or "stdio" to override server.transport.
 
 (Additional overrides can be added; none other are presently implemented.)
 
@@ -100,6 +108,21 @@ Behavior in terminal mode:
 * On exit, terminal settings are restored and both socket clients close cleanly.
 
 If the socket cannot be found you’ll get an error suggesting you start the MCP server first.
+
+## MCP Transport Modes
+
+Two transport modes are supported:
+
+1. HTTP(S) (default)
+   - Configure TLS cert/key in config.yaml (server.tls_cert / server.tls_key)
+   - Requires API key unless allow_anon: true.
+   - Start: `uv run ttygeist`
+
+2. STDIO
+   - Launches MCP over process stdin/stdout (suitable for desktop MCP clients like Claude Desktop).
+   - Start: `uv run ttygeist -- --transport stdio` or set `TTYGEIST_TRANSPORT=stdio`.
+   - Ignores HTTP-specific settings (host, port, tls_*). Auth headers are not used.
+   - API keys / anonymous access are not relevant; the client already controls the local process.
 
 ## MCP Tool Reference
 

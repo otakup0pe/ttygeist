@@ -43,7 +43,8 @@ class Config:
                 'port': 8443,
                 'tls_cert': 'cert.pem',
                 'tls_key': 'key.pem',
-                'name': 'ttygeist'
+                'name': 'ttygeist',
+                'transport': 'http'
             },
             'logging': {
                 'file': 'ttygeist.log',
@@ -88,6 +89,12 @@ class Config:
         if 'TTYGEIST_REQUEST_LOG' in os.environ:
             val = os.environ['TTYGEIST_REQUEST_LOG'].strip().lower()
             self.data['logging']['request_log'] = val in {"1", "true", "yes"}
+
+        # Transport override (http or stdio)
+        if 'TTYGEIST_TRANSPORT' in os.environ:
+            val = os.environ['TTYGEIST_TRANSPORT'].strip().lower()
+            if val in {"http", "stdio"}:
+                self.data['server']['transport'] = val
 
     @property
     def serial_port(self) -> str:
@@ -144,6 +151,10 @@ class Config:
     @property
     def server_port(self) -> int:
         return self.data['server']['port']
+
+    @property
+    def server_transport(self) -> str:
+        return self.data['server'].get('transport', 'http')
 
     @property
     def tls_cert_path(self) -> str:
