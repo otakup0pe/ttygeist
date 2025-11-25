@@ -35,8 +35,44 @@ class SocketServer:
             return
         socket_dir = Path(self.socket_path).parent
         socket_dir.mkdir(parents=True, exist_ok=True)
+
+        # Sweep stale per-PID sockets matching the template before binding.
+        # Assumes template resembles '.../ttygeist-<pid>.sock'. We derive a glob pattern
+        # by replacing our current PID with '*'. Only remove sockets whose PID is not alive.
+        try:
+            import glob, re
+            current_pid_str = str(os.getpid())
+            pattern = self.socket_path.replace(current_pid_str, '*')
+            for candidate in glob.glob(pattern):
+                if candidate == self.socket_path:
+                    continue  # Skip our own target path
+                base = os.path.basename(candidate)
+                m = re.match(r'ttygeist-(\d+)\.sock$', base)
+                if not m:
+                    continue
+                pid_val = int(m.group(1))
+                if pid_val == os.getpid():
+                    continue
+                # Check if process is alive (portable). os.kill(pid, 0) raises if dead.
+                alive = True
+                try:
+                    os.kill(pid_val, 0)
+                except OSError:
+                    alive = False
+                if not alive:
+                    try:
+                        os.unlink(candidate)
+                        logger.info(f"Removed stale socket {candidate} (dead PID {pid_val})")
+                    except Exception as e:
+                        logger.warning(f"Failed removing stale socket {candidate}: {e}")
+        except Exception as e:
+            logger.debug(f"Stale socket sweep skipped due to error: {e}")
+
         if os.path.exists(self.socket_path):
-            os.unlink(self.socket_path)
+            try:
+                os.unlink(self.socket_path)
+            except Exception as e:
+                logger.warning(f"Failed unlinking pre-existing socket {self.socket_path}: {e}")
         self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server_socket.bind(self.socket_path)
         self.server_socket.listen(5)
@@ -47,20 +83,25 @@ class SocketServer:
         logger.info(f"Socket server started on {self.socket_path}")
 
     def stop(self):
-        if not self.running:
-            return
+        # Make unlink robust even if start() never marked running yet or was already cleared.
+        was_running = self.running
         self.running = False
         if self.server_socket:
             try:
                 self.server_socket.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error closing server socket: {e}")
+            finally:
+                self.server_socket = None
         if os.path.exists(self.socket_path):
             try:
                 os.unlink(self.socket_path)
-            except Exception:
-                pass
-        logger.info("Socket server stopped")
+            except Exception as e:
+                logger.warning(f"Failed to unlink socket {self.socket_path}: {e}")
+        if was_running:
+            logger.info("Socket server stopped")
+        else:
+            logger.info("Socket server stop called (server not marked running) - ensured cleanup")
 
     # ---------------------- Accept loop ----------------------
     def _run_server(self):

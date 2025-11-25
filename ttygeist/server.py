@@ -6,6 +6,9 @@ import logging
 from logging.handlers import RotatingFileHandler
 import time
 from typing import Optional
+import signal
+import atexit
+import sys
 
 from fastmcp import FastMCP
 
@@ -22,6 +25,7 @@ buffer_manager: Optional[BufferManager] = None
 serial_manager: Optional[SerialManager] = None
 socket_server: Optional[SocketServer] = None
 
+_shutdown_executed: bool = False
 
 def setup_logging(config: Config):
     """Configure logging with file handler."""
@@ -43,6 +47,31 @@ def setup_logging(config: Config):
     logger.addHandler(file_handler)
 
     logging.info("Logging configured")
+
+
+def graceful_shutdown(source: str = "unknown"):
+    """Idempotent shutdown for all subsystems.
+
+    Ensures socket + serial manager cleanup regardless of termination path.
+    """
+    global _shutdown_executed, socket_server, serial_manager
+    if _shutdown_executed:
+        return
+    _shutdown_executed = True
+    logging.info(f"Graceful shutdown initiated by {source}")
+    try:
+        if socket_server:
+            try:
+                socket_server.stop()
+            except Exception as e:
+                logging.error(f"Error stopping socket server: {e}", exc_info=True)
+        if serial_manager:
+            try:
+                serial_manager.stop()
+            except Exception as e:
+                logging.error(f"Error stopping serial manager: {e}", exc_info=True)
+    finally:
+        logging.info("ttygeist Server stopped")
 
 
 def create_mcp_server(cfg: Config) -> FastMCP:
@@ -88,7 +117,37 @@ def create_mcp_server(cfg: Config) -> FastMCP:
 
     logging.info("MCP server instance created; registering tools")
 
-    # Register tools in specified order
+    # Register termination hooks now that subsystems exist
+    def _signal_handler(signum, frame):
+        sig_name = signal.Signals(signum).name
+        logging.info(f"Received signal {sig_name}; initiating shutdown")
+        graceful_shutdown(f"signal {sig_name}")
+        # Exit immediately to ensure client sees termination
+        sys.exit(0)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
+        try:
+            signal.signal(sig, _signal_handler)
+        except Exception:
+            pass  # not fatal
+
+    atexit.register(lambda: graceful_shutdown("atexit"))
+
+    # ---------------- MCP Tools ----------------
+
+    @mcp.tool()
+    async def server_shutdown() -> dict:
+        """Explicit cooperative shutdown request.
+
+        Allows an MCP client (e.g. Emacs) to request server termination so
+        cleanup happens before the process is killed.
+        """
+        logging.info("server_shutdown tool invoked")
+        graceful_shutdown("tool server_shutdown")
+        # Return success before exit so client gets confirmation
+        # Use asyncio.create_task to exit after response is flushed.
+        asyncio.get_running_loop().call_soon(sys.exit, 0)
+        return {"success": True}
 
     @mcp.tool()
     async def serial_read(
@@ -384,7 +443,7 @@ def create_mcp_server(cfg: Config) -> FastMCP:
                 'port_connected': False
             }
 
-    logging.info("Tools registered: serial_read, serial_status, buffer_clear, buffer_inspect, serial_reconnect, serial_write")
+    logging.info("Tools registered: server_shutdown, serial_read, serial_status, buffer_clear, buffer_inspect, serial_reconnect, serial_write")
 
     return mcp
 
@@ -447,11 +506,7 @@ def main():
         except KeyboardInterrupt:
             logging.info("Received shutdown signal (stdio)")
         finally:
-            if socket_server:
-                socket_server.stop()
-            if serial_manager:
-                serial_manager.stop()
-            logging.info("ttygeist Server stopped")
+            graceful_shutdown("stdio exit")
         return
 
     # HTTP path remains unchanged
@@ -504,11 +559,7 @@ def main():
     except KeyboardInterrupt:
         logging.info("Received shutdown signal")
     finally:
-        if socket_server:
-            socket_server.stop()
-        if serial_manager:
-            serial_manager.stop()
-        logging.info("ttygeist Server stopped")
+        graceful_shutdown("http exit")
 
 
 if __name__ == '__main__':
