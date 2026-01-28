@@ -140,6 +140,10 @@ class SerialManager:
                     dsrdtr=False,
                     rtscts=False,
                 )
+                # Explicitly prevent DTR/RTS from triggering board resets
+                # Many CircuitPython/Arduino boards reset when DTR is asserted
+                self.serial_port.dtr = False
+                self.serial_port.rts = False
                 self.is_connected = True
                 self.connection_start_time = time.time()
                 self.last_error = None
@@ -197,8 +201,13 @@ class SerialManager:
     def _read_loop(self):
         logger.info("Read loop started")
         line_buffer = b""
+        # UTF-8 decoder state to handle multi-byte sequences across chunks
+        import codecs
+        utf8_decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
         last_data_time = time.time()
         partial_line_timeout = 1.0
+        connection_stable_time = time.time() + 0.5  # Grace period for device initialization
+
         while self.is_running and self.is_connected:
             try:
                 with self.lock:
@@ -210,10 +219,23 @@ class SerialManager:
                     waiting = serial_port.in_waiting
                     if waiting > 0:
                         chunk += serial_port.read(waiting)
+
+                    # Filter out garbage during initial connection
+                    # Many devices send null bytes, initialization sequences, or garbage
+                    # when first connecting. Wait for connection to stabilize.
+                    current_time = time.time()
+                    if current_time < connection_stable_time:
+                        # During grace period, filter out suspicious patterns
+                        # Keep printable ASCII, common control chars, and valid UTF-8
+                        if all(b == 0 or (b < 0x20 and b not in (0x08, 0x09, 0x0A, 0x0D, 0x1B)) for b in chunk):
+                            logger.debug(f"Filtered {len(chunk)} garbage bytes during connection init")
+                            continue
+
                     # Broadcast raw chunk BEFORE line parsing
                     self._broadcast_raw(chunk)
                     line_buffer += chunk
-                    last_data_time = time.time()
+                    last_data_time = current_time
+
                     # Process complete lines
                     while b'\n' in line_buffer or b'\r' in line_buffer:
                         if b'\r\n' in line_buffer:
@@ -226,27 +248,46 @@ class SerialManager:
                             break
                         if line:
                             try:
-                                decoded = line.decode('utf-8', errors='replace')
+                                # Use incremental decoder for proper multi-byte UTF-8 handling
+                                decoded = utf8_decoder.decode(line, final=False)
                                 if decoded:
-                                    self.buffer_manager.append(decoded)
-                                    logger.debug(f"Buffered line: {decoded[:100]}")
+                                    # Strip any remaining control characters except common ones
+                                    decoded = ''.join(
+                                        c for c in decoded
+                                        if c >= ' ' or c in '\t\n\r\x1b' or ord(c) >= 0x80
+                                    )
+                                    if decoded:
+                                        self.buffer_manager.append(decoded)
+                                        logger.debug(f"Buffered line: {decoded[:100]}")
                             except Exception as e:
                                 logger.error(f"Error decoding serial data: {e}")
                 else:
                     # No data; handle partial line flush
-                    if line_buffer and (time.time() - last_data_time) > partial_line_timeout:
+                    current_time = time.time()
+                    if line_buffer and (current_time - last_data_time) > partial_line_timeout:
                         # Partial line timeout reached. We do NOT rebroadcast raw data here
                         # to avoid duplicating prompts or static fragments (e.g. CircuitPython '>>> ').
                         # Raw bytes were already streamed incrementally when first read.
                         try:
-                            decoded = line_buffer.decode('utf-8', errors='replace')
+                            # Flush any remaining bytes in the decoder
+                            decoded = utf8_decoder.decode(line_buffer, final=True)
+                            # Reset decoder for next sequence
+                            utf8_decoder.reset()
                             if decoded:
-                                self.buffer_manager.append(decoded)
-                                logger.debug(f"Buffered partial line (no raw re-broadcast): {decoded[:100]}")
+                                # Strip control characters
+                                decoded = ''.join(
+                                    c for c in decoded
+                                    if c >= ' ' or c in '\t\n\r\x1b' or ord(c) >= 0x80
+                                )
+                                if decoded:
+                                    self.buffer_manager.append(decoded)
+                                    logger.debug(f"Buffered partial line (no raw re-broadcast): {decoded[:100]}")
                         except Exception as e:
                             logger.error(f"Error decoding partial line: {e}")
+                            # Reset decoder on error
+                            utf8_decoder.reset()
                         line_buffer = b""
-                        last_data_time = time.time()
+                        last_data_time = current_time
             except SerialException as e:
                 logger.error(f"Serial read error: {e}")
                 with self.lock:
