@@ -193,7 +193,7 @@ Two transport modes are supported:
 
 ## License
 
-Licensed under the MIT License. See the [LICENSE](https://github.com/ANXS/python/blob/master/LICENSE) file for details.
+Licensed under the BSD License. See the [LICENSE](https://github.com/otakup0pe/ttygeist/blob/master/LICENSE) file for details.
 
 ## Feedback, bug-reports, requests, ...
 
