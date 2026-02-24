@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import atexit
 import logging
+import re
 import signal
 import sys
 import time
@@ -23,6 +24,42 @@ serial_manager: SerialManager | None = None
 socket_server: SocketServer | None = None
 
 _shutdown_executed: bool = False
+
+# Regex for Python-style escape sequences that arrive as literal strings
+# from JSON-RPC (e.g. the 4-char string \x03 instead of byte 0x03).
+
+_ESCAPE_RE = re.compile(
+    r"\\x([0-9a-fA-F]{2})"  # \xNN hex byte
+    r"|\\u([0-9a-fA-F]{4})"  # \uNNNN unicode
+    r"|\\([nrtab0\\])"  # \n \r \t \a \b \0 \\
+)
+_SIMPLE_ESCAPES = {
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "a": "\a",
+    "b": "\b",
+    "0": "\0",
+    "\\": "\\",
+}
+
+
+def _decode_escapes(data: str) -> str:
+    """Decode Python-style escape sequences in a string from JSON-RPC.
+
+    Handles \\xNN (hex byte), \\uNNNN (unicode), and common single-char
+    escapes (\\n, \\r, \\t, \\a, \\b, \\0, \\\\). Leaves unrecognized
+    sequences unchanged.
+    """
+
+    def _replace(m):
+        if m.group(1) is not None:
+            return chr(int(m.group(1), 16))
+        if m.group(2) is not None:
+            return chr(int(m.group(2), 16))
+        return _SIMPLE_ESCAPES[m.group(3)]
+
+    return _ESCAPE_RE.sub(_replace, data)
 
 
 def setup_logging(config: Config):
@@ -88,6 +125,8 @@ def create_mcp_server(cfg: Config) -> FastMCP:
         stopbits=config.serial_stopbits,
         timeout=config.serial_timeout,
         write_timeout=config.serial_write_timeout,
+        dtr=config.serial_dtr,
+        rts=config.serial_rts,
         reconnect_delay=config.reconnect_delay,
         max_reconnect_delay=config.max_reconnect_delay,
         reconnect_backoff_multiplier=config.reconnect_backoff_multiplier,
@@ -335,9 +374,14 @@ def create_mcp_server(cfg: Config) -> FastMCP:
         """
         logging.debug(f"serial_write entry data_len={len(data)}, add_newline={add_newline}")
         try:
-            logging.info(f"serial_write called: data_len={len(data)}, add_newline={add_newline}")
+            # Decode escape sequences that arrive as literal strings from JSON-RPC
+            # (e.g. the LLM sends "\x03" as 4 chars, we need byte 0x03)
+            decoded_data = _decode_escapes(data)
+            logging.info(
+                f"serial_write called: data_len={len(data)}, decoded_len={len(decoded_data)}, add_newline={add_newline}"
+            )
             result = await asyncio.wait_for(
-                asyncio.to_thread(serial_manager.write, data=data, add_newline=add_newline), timeout=5.0
+                asyncio.to_thread(serial_manager.write, data=decoded_data, add_newline=add_newline), timeout=5.0
             )
 
             # Get current status for context

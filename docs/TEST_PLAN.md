@@ -24,6 +24,10 @@ Work through the tests in order. Each test has:
 If a test fails, stop and report which test failed and what you observed.
 Do not skip ahead -- later tests may depend on earlier state.
 
+When instructed to wait briefly, 5s or so is appropriate.
+
+Invoke tests 1-11 and report back. Then for 12-15, do them one at a time with the user.
+
 ---
 
 ## Test 0: Verify Connection

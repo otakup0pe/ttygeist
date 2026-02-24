@@ -27,6 +27,8 @@ class SerialManager:
         stopbits: float,
         timeout: float,
         write_timeout: float,
+        dtr: bool,
+        rts: bool,
         reconnect_delay: float,
         max_reconnect_delay: float,
         reconnect_backoff_multiplier: float,
@@ -40,6 +42,8 @@ class SerialManager:
         self.stopbits = stopbits
         self.timeout = timeout
         self.write_timeout = write_timeout
+        self.dtr = dtr
+        self.rts = rts
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_delay = max_reconnect_delay
         self.reconnect_backoff_multiplier = reconnect_backoff_multiplier
@@ -125,6 +129,7 @@ class SerialManager:
         try:
             with self.lock:
                 if self.serial_port and self.serial_port.is_open:
+                    self.is_connected = True
                     return True
                 logger.info(f"Connecting to {self.port} at {self.baudrate} baud...")
                 self.serial_port = serial.Serial(
@@ -138,10 +143,10 @@ class SerialManager:
                     dsrdtr=False,
                     rtscts=False,
                 )
-                # Explicitly prevent DTR/RTS from triggering board resets
-                # Many CircuitPython/Arduino boards reset when DTR is asserted
-                self.serial_port.dtr = False
-                self.serial_port.rts = False
+                # Set DTR/RTS per config. CircuitPython needs DTR=True to
+                # enable serial output; Arduino boards may reset on DTR.
+                self.serial_port.dtr = self.dtr
+                self.serial_port.rts = self.rts
                 self.is_connected = True
                 self.connection_start_time = time.time()
                 self.last_error = None
@@ -260,7 +265,10 @@ class SerialManager:
                             except Exception as e:
                                 logger.error(f"Error decoding serial data: {e}")
                 else:
-                    # No data; handle partial line flush
+                    # No data; defensive throttle in case the driver returns
+                    # immediately from read() despite the configured timeout.
+                    time.sleep(0.01)
+                    # Handle partial line flush
                     current_time = time.time()
                     if line_buffer and (current_time - last_data_time) > partial_line_timeout:
                         # Partial line timeout reached. We do NOT rebroadcast raw data here

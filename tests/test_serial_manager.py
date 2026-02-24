@@ -21,6 +21,8 @@ def _make_manager(**overrides) -> SerialManager:
         stopbits=1,
         timeout=0.1,
         write_timeout=0.1,
+        dtr=True,
+        rts=False,
         reconnect_delay=0.1,
         max_reconnect_delay=1.0,
         reconnect_backoff_multiplier=1.5,
@@ -232,8 +234,8 @@ class TestConnect:
         assert result is True
         assert mgr.is_connected is True
         assert mgr.serial_port is mock_port
-        # Verify DTR/RTS are explicitly disabled
-        assert mock_port.dtr is False
+        # Verify DTR/RTS are set per config defaults (dtr=True, rts=False)
+        assert mock_port.dtr is True
         assert mock_port.rts is False
 
     @patch("ttygeist.serial_manager.serial.Serial")
@@ -251,6 +253,25 @@ class TestConnect:
         mgr.serial_port = _fake_serial(is_open=True)
         result = mgr._connect()
         assert result is True
+
+    def test_connect_already_open_sets_is_connected(self):
+        """Fast-path must set is_connected to prevent monitor loop spin."""
+        mgr = _make_manager()
+        mgr.serial_port = _fake_serial(is_open=True)
+        mgr.is_connected = False
+        result = mgr._connect()
+        assert result is True
+        assert mgr.is_connected is True
+
+    @patch("ttygeist.serial_manager.serial.Serial")
+    def test_connect_dtr_rts_from_config(self, mock_serial_cls):
+        mock_port = _fake_serial()
+        mock_serial_cls.return_value = mock_port
+        mgr = _make_manager(dtr=False, rts=True)
+        result = mgr._connect()
+        assert result is True
+        assert mock_port.dtr is False
+        assert mock_port.rts is True
 
 
 class TestDisconnect:

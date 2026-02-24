@@ -114,6 +114,42 @@ class TestEnvOverrides:
         assert cfg.server_transport == "stdio"
 
 
+class TestDtrRtsConfig:
+    def test_defaults(self, clean_env):
+        cfg = Config()
+        assert cfg.serial_dtr is True
+        assert cfg.serial_rts is False
+
+    def test_from_yaml(self, tmp_config_file, clean_env):
+        path = tmp_config_file(
+            "serial:\n  port: /dev/ttyUSB0\n  baudrate: 115200\n  bytesize: 8\n  parity: N\n  stopbits: 1\n"
+            "  timeout: 1.0\n  write_timeout: 1.0\n  dtr: false\n  rts: true\n"
+            "  reconnect_delay: 2.0\n  max_reconnect_delay: 30.0\n  reconnect_backoff_multiplier: 1.5\n"
+            "buffer:\n  max_size_mb: 10\n  line_limit: 100000\n  overflow: fifo\n"
+            "server:\n  host: 127.0.0.1\n  port: 8443\n  tls_cert: cert.pem\n  tls_key: key.pem\n  name: ttygeist\n  transport: stdio\n"
+            "logging:\n  file: ttygeist.log\n  level: INFO\n  format: '%(message)s'\n  max_size_mb: 50\n  backup_count: 3\n  request_log: false\n"
+            "auth:\n  api_keys: []\n  header_name: X-API-Key\n  allow_anon: false\n"
+            "socket:\n  path: /tmp/t.sock\n"
+        )
+        cfg = Config(config_path=path)
+        assert cfg.serial_dtr is False
+        assert cfg.serial_rts is True
+
+    def test_missing_keys_use_defaults(self, tmp_config_file, clean_env):
+        """Config files without dtr/rts keys should get safe defaults."""
+        path = tmp_config_file(
+            "serial:\n  port: /dev/ttyUSB0\n  baudrate: 115200\n"
+            "buffer:\n  max_size_mb: 10\n  line_limit: 100000\n  overflow: fifo\n"
+            "server:\n  host: 127.0.0.1\n  port: 8443\n  tls_cert: cert.pem\n  tls_key: key.pem\n  name: ttygeist\n  transport: stdio\n"
+            "logging:\n  file: ttygeist.log\n  level: INFO\n  format: '%(message)s'\n  max_size_mb: 50\n  backup_count: 3\n  request_log: false\n"
+            "auth:\n  api_keys: []\n  header_name: X-API-Key\n  allow_anon: false\n"
+            "socket:\n  path: /tmp/t.sock\n"
+        )
+        cfg = Config(config_path=path)
+        assert cfg.serial_dtr is True
+        assert cfg.serial_rts is False
+
+
 class TestSocketPath:
     def test_pid_expansion(self, clean_env):
         cfg = Config()

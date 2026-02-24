@@ -25,7 +25,7 @@ $ uv run ttygeist
 
 ## Configuration
 
-ttygeist loads configuration from a YAML file passed via `--config` (or `-c`). When no file is provided, sensible defaults are used for every key -- no config file is required to get started.
+ttygeist loads configuration from a YAML file passed via `--config` (or `-c`). When no file is provided, sensible defaults are used for every key -- no config file is required to get started. This default config file should work with (at least some) CircuitPython esp32 devices.
 
 ### Config Reference
 
@@ -38,6 +38,8 @@ serial:
   stopbits: 1                  # 1, 1.5, or 2
   timeout: 1.0                 # read timeout (seconds)
   write_timeout: 1.0           # write timeout (seconds)
+  dtr: true                    # assert DTR
+  rts: false                   # assert RTS
   reconnect_delay: 2.0         # initial reconnect wait (seconds)
   max_reconnect_delay: 30.0    # cap for exponential backoff
   reconnect_backoff_multiplier: 1.5

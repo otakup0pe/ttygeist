@@ -39,9 +39,15 @@ class TerminalEmulator:
         self.csi_buffer = ""
         self.output_buffer = ""
         self.last_was_cr = False
+        # UTF-8 multi-byte accumulation buffer
+        self._utf8_buf = bytearray()
+        self._utf8_expected = 0
 
     def process_byte(self, byte: int) -> str | None:
         """Process a single byte through the state machine.
+
+        Handles UTF-8 multi-byte sequences by accumulating continuation
+        bytes and decoding the complete sequence before emitting.
 
         Args:
             byte: Byte to process (0-255)
@@ -49,7 +55,54 @@ class TerminalEmulator:
         Returns:
             Output string if any should be emitted, None otherwise
         """
-        char = chr(byte) if byte < 128 else chr(byte)
+        # UTF-8 continuation byte (10xxxxxx) while accumulating
+        if self._utf8_expected > 0:
+            if 0x80 <= byte <= 0xBF:
+                self._utf8_buf.append(byte)
+                self._utf8_expected -= 1
+                if self._utf8_expected == 0:
+                    # Complete sequence -- decode and emit
+                    try:
+                        result = bytes(self._utf8_buf).decode("utf-8")
+                    except UnicodeDecodeError:
+                        result = None
+                        logger.debug(f"Invalid UTF-8 sequence: {self._utf8_buf.hex()}")
+                    self._utf8_buf.clear()
+                    self.last_was_cr = False
+                    return result
+                return None
+            else:
+                # Broken sequence -- discard buffer, reprocess this byte
+                logger.debug(f"Broken UTF-8 sequence: {self._utf8_buf.hex()}")
+                self._utf8_buf.clear()
+                self._utf8_expected = 0
+                # Fall through to process this byte normally
+
+        # Start of multi-byte UTF-8 sequence
+        if byte >= 0xC0:
+            self._utf8_buf.clear()
+            self._utf8_buf.append(byte)
+            if byte < 0xE0:
+                self._utf8_expected = 1  # 2-byte sequence
+            elif byte < 0xF0:
+                self._utf8_expected = 2  # 3-byte sequence
+            elif byte < 0xF8:
+                self._utf8_expected = 3  # 4-byte sequence
+            else:
+                # Invalid lead byte
+                self._utf8_buf.clear()
+                self._utf8_expected = 0
+                logger.debug(f"Invalid UTF-8 lead byte: 0x{byte:02x}")
+                return None
+            return None
+
+        # Bare continuation byte outside a sequence -- skip it
+        if 0x80 <= byte <= 0xBF:
+            logger.debug(f"Orphan UTF-8 continuation byte: 0x{byte:02x}")
+            return None
+
+        # ASCII byte (0x00-0x7F) -- process through state machine
+        char = chr(byte)
 
         if self.state == ParserState.NORMAL:
             return self._handle_normal(byte, char)

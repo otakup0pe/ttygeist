@@ -29,6 +29,8 @@ class Config:
                 "stopbits": 1,
                 "timeout": 1.0,
                 "write_timeout": 1.0,
+                "dtr": True,
+                "rts": False,
                 "reconnect_delay": 2.0,
                 "max_reconnect_delay": 30.0,
                 "reconnect_backoff_multiplier": 1.5,
@@ -123,6 +125,14 @@ class Config:
     @property
     def serial_write_timeout(self) -> float:
         return self.data["serial"]["write_timeout"]
+
+    @property
+    def serial_dtr(self) -> bool:
+        return self.data["serial"].get("dtr", True)
+
+    @property
+    def serial_rts(self) -> bool:
+        return self.data["serial"].get("rts", False)
 
     @property
     def reconnect_delay(self) -> float:
