@@ -1,17 +1,18 @@
 """Unix socket client for CLI communication with MCP server (line + raw)."""
 
+import base64
 import json
 import os
-import socket
 import select
-import base64
-from typing import Any, Callable, Dict, Optional
+import socket
+from collections.abc import Callable
+from typing import Any
 
 
 class SocketClient:
     def __init__(self, socket_path: str):
         self.socket_path = os.path.expanduser(socket_path)
-        self.sock: Optional[socket.socket] = None
+        self.sock: socket.socket | None = None
         self._request_id = 0
 
     def connect(self) -> bool:
@@ -19,12 +20,16 @@ class SocketClient:
             self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.sock.connect(self.socket_path)
             return True
-        except FileNotFoundError:
-            raise ConnectionError(f"Socket not found at {self.socket_path}\nIs the MCP server running? Start it with: uv run serial-mcp")
-        except ConnectionRefusedError:
-            raise ConnectionError(f"Connection refused to {self.socket_path}\nIs the MCP server running? Start it with: uv run serial-mcp")
+        except FileNotFoundError as e:
+            raise ConnectionError(
+                f"Socket not found at {self.socket_path}\nIs the MCP server running? Start it with: uv run serial-mcp"
+            ) from e
+        except ConnectionRefusedError as e:
+            raise ConnectionError(
+                f"Connection refused to {self.socket_path}\nIs the MCP server running? Start it with: uv run serial-mcp"
+            ) from e
         except Exception as e:
-            raise ConnectionError(f"Failed to connect to socket: {e}")
+            raise ConnectionError(f"Failed to connect to socket: {e}") from e
 
     def close(self):
         if self.sock:
@@ -37,11 +42,11 @@ class SocketClient:
         self._request_id += 1
         return self._request_id
 
-    def _send_request(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    def _send_request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.sock:
             raise RuntimeError("Not connected to server")
         request = {"method": method, "params": params or {}, "id": self._next_id()}
-        self.sock.sendall((json.dumps(request) + "\n").encode('utf-8'))
+        self.sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
         buffer = b""
         while b"\n" not in buffer:
             chunk = self.sock.recv(4096)
@@ -49,27 +54,27 @@ class SocketClient:
                 raise ConnectionError("Server closed connection")
             buffer += chunk
         line, _ = buffer.split(b"\n", 1)
-        response = json.loads(line.decode('utf-8'))
+        response = json.loads(line.decode("utf-8"))
         if response.get("error"):
             raise RuntimeError(response["error"])
         return response.get("result")
 
     # ---------------------- Standard methods ----------------------
-    def buffer_inspect(self, tail_lines: int = 32) -> Dict[str, Any]:
+    def buffer_inspect(self, tail_lines: int = 32) -> dict[str, Any]:
         return self._send_request("buffer_inspect", {"tail_lines": tail_lines})
 
-    def serial_status(self) -> Dict[str, Any]:
+    def serial_status(self) -> dict[str, Any]:
         return self._send_request("serial_status")
 
-    def serial_write(self, data: str, add_newline: bool = True) -> Dict[str, Any]:
+    def serial_write(self, data: str, add_newline: bool = True) -> dict[str, Any]:
         return self._send_request("serial_write", {"data": data, "add_newline": add_newline})
 
     # ---------------------- Streaming (line) ----------------------
-    def buffer_stream(self, callback: Callable[[str], None], stop_event: Optional[Any] = None, poll_interval: float = 0.1):
+    def buffer_stream(self, callback: Callable[[str], None], stop_event: Any | None = None, poll_interval: float = 0.1):
         if not self.sock:
             raise RuntimeError("Not connected to server")
         request = {"method": "buffer_stream", "params": {}, "id": self._next_id()}
-        self.sock.sendall((json.dumps(request) + "\n").encode('utf-8'))
+        self.sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
         buffer = b""
         try:
             while True:
@@ -87,7 +92,7 @@ class SocketClient:
                     if not line:
                         continue
                     try:
-                        msg = json.loads(line.decode('utf-8'))
+                        msg = json.loads(line.decode("utf-8"))
                     except json.JSONDecodeError:
                         continue
                     if "stream" in msg:
@@ -98,11 +103,11 @@ class SocketClient:
             pass
 
     # ---------------------- Streaming (raw) ----------------------
-    def raw_stream(self, callback: Callable[[bytes], None], stop_event: Optional[Any] = None, poll_interval: float = 0.05):
+    def raw_stream(self, callback: Callable[[bytes], None], stop_event: Any | None = None, poll_interval: float = 0.05):
         if not self.sock:
             raise RuntimeError("Not connected to server")
         request = {"method": "raw_stream", "params": {}, "id": self._next_id()}
-        self.sock.sendall((json.dumps(request) + "\n").encode('utf-8'))
+        self.sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
         buffer = b""
         try:
             while True:
@@ -120,7 +125,7 @@ class SocketClient:
                     if not line:
                         continue
                     try:
-                        msg = json.loads(line.decode('utf-8'))
+                        msg = json.loads(line.decode("utf-8"))
                     except json.JSONDecodeError:
                         continue
                     if "raw" in msg:

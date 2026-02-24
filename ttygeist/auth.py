@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import hmac
 import logging
-from typing import Iterable, Set, Callable, Awaitable, Dict, Any
+from collections.abc import Awaitable, Callable, Iterable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +28,21 @@ class APIKeyAuthASGIMiddleware:
     def __init__(self, app: Callable, api_keys: Iterable[str], header_name: str = "X-API-Key") -> None:
         self.app = app
         # Normalize and store as a set for membership checks
-        self._keys: Set[str] = {str(k) for k in api_keys if str(k)}
+        self._keys: set[str] = {str(k) for k in api_keys if str(k)}
         self.header_name = header_name
         self._use_bearer = header_name.lower() == "authorization"
 
         if not self._keys:
-            logger.warning("APIKeyAuthASGIMiddleware initialized with zero keys; all requests will be rejected unless allow_anon bypasses middleware.")
+            logger.warning(
+                "APIKeyAuthASGIMiddleware initialized with zero keys; all requests will be rejected unless allow_anon bypasses middleware."
+            )
 
-    async def __call__(self, scope: Dict[str, Any], receive: Callable[[], Awaitable[Dict[str, Any]]], send: Callable[[Dict[str, Any]], Awaitable[None]]):
+    async def __call__(
+        self,
+        scope: dict[str, Any],
+        receive: Callable[[], Awaitable[dict[str, Any]]],
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+    ):
         # Only guard HTTP requests; pass through websockets & other scope types.
         if scope.get("type") != "http":
             return await self.app(scope, receive, send)
@@ -76,16 +84,23 @@ class APIKeyAuthASGIMiddleware:
         # Proceed to wrapped app.
         return await self.app(scope, receive, send)
 
-    async def _reject(self, send: Callable[[Dict[str, Any]], Awaitable[None]], error: str = "Unauthorized", detail: str = "Missing or invalid API key") -> None:
-        body_bytes = (f"{{\n  \"error\": \"{error}\",\n  \"detail\": \"{detail}\"\n}}" ).encode()
-        await send({
-            "type": "http.response.start",
-            "status": 401,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(body_bytes)).encode()),
-            ],
-        })
+    async def _reject(
+        self,
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+        error: str = "Unauthorized",
+        detail: str = "Missing or invalid API key",
+    ) -> None:
+        body_bytes = (f'{{\n  "error": "{error}",\n  "detail": "{detail}"\n}}').encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body_bytes)).encode()),
+                ],
+            }
+        )
         await send({"type": "http.response.body", "body": body_bytes})
 
 

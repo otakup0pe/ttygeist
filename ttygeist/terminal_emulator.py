@@ -3,13 +3,13 @@
 import logging
 import sys
 from enum import Enum
-from typing import Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 class ParserState(Enum):
     """Parser state machine states."""
+
     NORMAL = 0
     ESC = 1
     CSI = 2
@@ -40,7 +40,7 @@ class TerminalEmulator:
         self.output_buffer = ""
         self.last_was_cr = False
 
-    def process_byte(self, byte: int) -> Optional[str]:
+    def process_byte(self, byte: int) -> str | None:
         """Process a single byte through the state machine.
 
         Args:
@@ -72,13 +72,13 @@ class TerminalEmulator:
             result = self.process_byte(byte)
             if result is not None:
                 output.append(result)
-        return ''.join(output)
+        return "".join(output)
 
     def process_string(self, data: str) -> str:
         """Process a string (convenience method)."""
-        return self.process_data(data.encode('utf-8', errors='replace'))
+        return self.process_data(data.encode("utf-8", errors="replace"))
 
-    def _handle_normal(self, byte: int, char: str) -> Optional[str]:
+    def _handle_normal(self, byte: int, char: str) -> str | None:
         """Handle NORMAL state."""
         if byte == 0x1B:  # ESC
             self.state = ParserState.ESC
@@ -86,22 +86,22 @@ class TerminalEmulator:
             return None
         elif byte == 0x07:  # BEL
             self.last_was_cr = False
-            return '\a'
+            return "\a"
         elif byte == 0x08:  # BS
             self.last_was_cr = False
-            return '\b'
+            return "\b"
         elif byte == 0x09:  # TAB
             self.last_was_cr = False
-            return '\t'
+            return "\t"
         elif byte == 0x0A:  # LF
             # Emit LF regardless of previous CR to avoid line overwrite issues
             self.last_was_cr = False
-            return '\n'
+            return "\n"
         elif byte == 0x0D:  # CR
             # Emit CR; many terminals treat CRLF as newline,
             # emitting both is safe
             self.last_was_cr = True
-            return '\r'
+            return "\r"
         elif byte < 0x20 and byte not in (0x07, 0x08, 0x09, 0x0A, 0x0D):
             logger.debug(f"Stripped control character: 0x{byte:02x}")
             self.last_was_cr = False
@@ -110,13 +110,13 @@ class TerminalEmulator:
             self.last_was_cr = False
             return char
 
-    def _handle_esc(self, byte: int, char: str) -> Optional[str]:
+    def _handle_esc(self, byte: int, char: str) -> str | None:
         """Handle ESC state."""
-        if char == '[':
+        if char == "[":
             self.state = ParserState.CSI
             self.csi_buffer = ""
             return None
-        elif char in 'cDEHMZ78':
+        elif char in "cDEHMZ78":
             self.state = ParserState.NORMAL
             return self._handle_single_esc(char)
         else:
@@ -124,9 +124,9 @@ class TerminalEmulator:
             self.state = ParserState.NORMAL
             return None
 
-    def _handle_csi(self, byte: int, char: str) -> Optional[str]:
+    def _handle_csi(self, byte: int, char: str) -> str | None:
         """Handle CSI state."""
-        if char.isalpha() or char in '@`':
+        if char.isalpha() or char in "@`":
             self.state = ParserState.NORMAL
             result = self._process_csi(self.csi_buffer + char)
             self.csi_buffer = ""
@@ -135,24 +135,24 @@ class TerminalEmulator:
             self.csi_buffer += char
             return None
 
-    def _handle_single_esc(self, char: str) -> Optional[str]:
+    def _handle_single_esc(self, char: str) -> str | None:
         """Handle single-character escape sequences."""
         escape_map = {
-            'c': '\x1bc',  # Reset terminal - pass through
-            'D': '\x1bD',  # Line feed - pass through
-            'E': '\x1bE',  # Next line - pass through
-            'H': None,     # Set tab stop - ignore
-            'M': '\x1bM',  # Reverse line feed - pass through
-            'Z': None,     # Identify terminal - ignore
-            '7': None,     # Save cursor position - ignore
-            '8': None,     # Restore cursor position - ignore
+            "c": "\x1bc",  # Reset terminal - pass through
+            "D": "\x1bD",  # Line feed - pass through
+            "E": "\x1bE",  # Next line - pass through
+            "H": None,  # Set tab stop - ignore
+            "M": "\x1bM",  # Reverse line feed - pass through
+            "Z": None,  # Identify terminal - ignore
+            "7": None,  # Save cursor position - ignore
+            "8": None,  # Restore cursor position - ignore
         }
         result = escape_map.get(char)
         if result is None and char not in escape_map:
             logger.warning(f"Unknown single ESC sequence: ESC {char}")
         return result
 
-    def _process_csi(self, sequence: str) -> Optional[str]:
+    def _process_csi(self, sequence: str) -> str | None:
         """Process a complete CSI sequence."""
         if not sequence:
             return None
@@ -161,30 +161,30 @@ class TerminalEmulator:
         params = []
         if params_str:
             try:
-                params = [int(p) if p else 0 for p in params_str.split(';')]
+                params = [int(p) if p else 0 for p in params_str.split(";")]
             except ValueError:
                 logger.warning(f"Malformed CSI parameters: {params_str}")
                 return None
-        if final_char == 'm':
+        if final_char == "m":
             return self._handle_sgr(params)
-        elif final_char in 'ABCDEFGHJ':
+        elif final_char in "ABCDEFGHJ":
             return self._handle_cursor_screen(final_char, params)
-        elif final_char == 'K':
+        elif final_char == "K":
             return self._handle_erase_line(params)
-        elif final_char in 'r':
+        elif final_char in "r":
             logger.debug(f"Ignoring CSI scrolling region: {sequence}")
             return None
-        elif final_char in 'su':
+        elif final_char in "su":
             logger.debug(f"Ignoring CSI cursor save/restore: {sequence}")
             return None
-        elif final_char in 'hl':
+        elif final_char in "hl":
             logger.debug(f"Ignoring CSI mode: {sequence}")
             return None
         else:
             logger.warning(f"Unknown CSI sequence: CSI {sequence}")
             return None
 
-    def _handle_sgr(self, params: list) -> Optional[str]:
+    def _handle_sgr(self, params: list) -> str | None:
         """Handle SGR (Select Graphic Rendition) sequences."""
         if not self.color_support:
             return None
@@ -192,52 +192,56 @@ class TerminalEmulator:
             params = [0]
         return f"\x1b[{';'.join(str(p) for p in params)}m"
 
-    def _handle_cursor_screen(self, command: str, params: list) -> Optional[str]:
+    def _handle_cursor_screen(self, command: str, params: list) -> str | None:
         """Handle cursor movement and screen operations."""
-        param_str = ';'.join(str(p) for p in params) if params else ''
+        param_str = ";".join(str(p) for p in params) if params else ""
         cursor_commands = {
-            'A': f"\x1b[{param_str}A",
-            'B': f"\x1b[{param_str}B",
-            'C': f"\x1b[{param_str}C",
-            'D': f"\x1b[{param_str}D",
-            'E': f"\x1b[{param_str}E",
-            'F': f"\x1b[{param_str}F",
-            'G': f"\x1b[{param_str}G",
-            'H': f"\x1b[{param_str}H",
-            'J': f"\x1b[{param_str}J",
+            "A": f"\x1b[{param_str}A",
+            "B": f"\x1b[{param_str}B",
+            "C": f"\x1b[{param_str}C",
+            "D": f"\x1b[{param_str}D",
+            "E": f"\x1b[{param_str}E",
+            "F": f"\x1b[{param_str}F",
+            "G": f"\x1b[{param_str}G",
+            "H": f"\x1b[{param_str}H",
+            "J": f"\x1b[{param_str}J",
         }
         return cursor_commands.get(command)
 
-    def _handle_erase_line(self, params: list) -> Optional[str]:
+    def _handle_erase_line(self, params: list) -> str | None:
         """Handle erase in line sequences."""
-        param_str = ';'.join(str(p) for p in params) if params else ''
+        param_str = ";".join(str(p) for p in params) if params else ""
         return f"\x1b[{param_str}K"
 
 
-def detect_terminal_capabilities() -> Tuple[bool, bool]:
+def detect_terminal_capabilities() -> tuple[bool, bool]:
     """Detect terminal color and unicode support."""
     color_support = False
     unicode_support = False
     if not sys.stdout.isatty():
         return False, False
     import os
-    term = os.environ.get('TERM', '')
-    colorterm = os.environ.get('COLORTERM', '')
-    if term.endswith('color') or '256color' in term or 'truecolor' in term:
-        color_support = True
-    elif colorterm in ('truecolor', '24bit'):
-        color_support = True
-    elif term in ('xterm', 'xterm-color', 'xterm-256color', 'screen', 'screen-256color',
-                  'tmux', 'tmux-256color', 'linux'):
+
+    term = os.environ.get("TERM", "")
+    colorterm = os.environ.get("COLORTERM", "")
+    if (
+        term.endswith("color")
+        or "256color" in term
+        or "truecolor" in term
+        or colorterm in ("truecolor", "24bit")
+        or term
+        in ("xterm", "xterm-color", "xterm-256color", "screen", "screen-256color", "tmux", "tmux-256color", "linux")
+    ):
         color_support = True
     import locale
+
     try:
         encoding = locale.getpreferredencoding()
-        if 'utf' in encoding.lower() or 'utf8' in encoding.lower():
+        if "utf" in encoding.lower() or "utf8" in encoding.lower():
             unicode_support = True
     except Exception:
         pass
-    lang = os.environ.get('LANG', '')
-    if 'utf' in lang.lower() or 'utf8' in lang.lower():
+    lang = os.environ.get("LANG", "")
+    if "utf" in lang.lower() or "utf8" in lang.lower():
         unicode_support = True
     return color_support, unicode_support

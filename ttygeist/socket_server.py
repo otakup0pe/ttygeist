@@ -3,11 +3,11 @@
 import json
 import logging
 import os
-import socket
 import select
+import socket
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -24,9 +24,9 @@ class SocketServer:
         self.socket_path = socket_path
         self.buffer_manager = buffer_manager
         self.serial_manager = serial_manager
-        self.server_socket: Optional[socket.socket] = None
+        self.server_socket: socket.socket | None = None
         self.running = False
-        self.server_thread: Optional[threading.Thread] = None
+        self.server_thread: threading.Thread | None = None
 
     # ---------------------- Lifecycle ----------------------
     def start(self):
@@ -40,14 +40,16 @@ class SocketServer:
         # Assumes template resembles '.../ttygeist-<pid>.sock'. We derive a glob pattern
         # by replacing our current PID with '*'. Only remove sockets whose PID is not alive.
         try:
-            import glob, re
+            import glob
+            import re
+
             current_pid_str = str(os.getpid())
-            pattern = self.socket_path.replace(current_pid_str, '*')
+            pattern = self.socket_path.replace(current_pid_str, "*")
             for candidate in glob.glob(pattern):
                 if candidate == self.socket_path:
                     continue  # Skip our own target path
                 base = os.path.basename(candidate)
-                m = re.match(r'ttygeist-(\d+)\.sock$', base)
+                m = re.match(r"ttygeist-(\d+)\.sock$", base)
                 if not m:
                     continue
                 pid_val = int(m.group(1))
@@ -128,7 +130,7 @@ class SocketServer:
                     if not line:
                         continue
                     try:
-                        request = json.loads(line.decode('utf-8'))
+                        request = json.loads(line.decode("utf-8"))
                     except json.JSONDecodeError as e:
                         self._send(client_socket, {"result": None, "error": f"Invalid JSON: {e}", "id": None})
                         continue
@@ -138,19 +140,19 @@ class SocketServer:
         except Exception as e:
             logger.error(f"Error in client handler: {e}")
         finally:
-            try:
-                client_socket.close()
-            except Exception:
-                pass
+            import contextlib
 
-    def _send(self, client_socket: socket.socket, response: Dict[str, Any]):
+            with contextlib.suppress(Exception):
+                client_socket.close()
+
+    def _send(self, client_socket: socket.socket, response: dict[str, Any]):
         try:
-            client_socket.sendall(json.dumps(response).encode('utf-8') + b"\n")
+            client_socket.sendall(json.dumps(response).encode("utf-8") + b"\n")
         except Exception as e:
             logger.error(f"Failed sending response: {e}")
 
     # ---------------------- Request dispatch ----------------------
-    def _handle_request(self, request: Dict[str, Any], client_socket: socket.socket) -> Optional[Dict[str, Any]]:
+    def _handle_request(self, request: dict[str, Any], client_socket: socket.socket) -> dict[str, Any] | None:
         method = request.get("method")
         params = request.get("params", {})
         req_id = request.get("id")
@@ -158,7 +160,7 @@ class SocketServer:
             if method == "buffer_inspect":
                 tail_lines = params.get("tail_lines", 32)
                 lines = self.buffer_manager.read_tail(tail_lines)
-                result = {"lines": [l.data + "\n" for l in lines], "count": len(lines)}
+                result = {"lines": [line.data + "\n" for line in lines], "count": len(lines)}
                 return {"result": result, "error": None, "id": req_id}
             if method == "buffer_stream":
                 self._stream_buffer(client_socket, req_id)
@@ -218,8 +220,8 @@ class SocketServer:
             logger.debug(f"Line stream ended: {e}")
 
     def _stream_raw(self, client_socket: socket.socket, req_id: Any):
-        import time
         import queue
+
         listener_q = self.serial_manager.add_raw_listener()
         try:
             while True:
@@ -230,7 +232,8 @@ class SocketServer:
                     continue
                 # Send raw chunk as base64 to avoid binary framing issues
                 import base64
-                b64 = base64.b64encode(chunk).decode('ascii')
+
+                b64 = base64.b64encode(chunk).decode("ascii")
                 msg = {"raw": b64, "id": req_id}
                 self._send(client_socket, msg)
         except Exception as e:

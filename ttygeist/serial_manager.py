@@ -1,13 +1,12 @@
 import logging
+import queue
 import threading
 import time
-import queue
-from typing import Optional, List
+
 import serial
 from serial.serialutil import SerialException
 
 from ttygeist.buffer_manager import BufferManager
-
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ class SerialManager:
         reconnect_delay: float,
         max_reconnect_delay: float,
         reconnect_backoff_multiplier: float,
-        buffer_manager: BufferManager
+        buffer_manager: BufferManager,
     ):
         """Initialize serial manager."""
         self.port = port
@@ -46,23 +45,23 @@ class SerialManager:
         self.reconnect_backoff_multiplier = reconnect_backoff_multiplier
 
         self.buffer_manager = buffer_manager
-        self.serial_port: Optional[serial.Serial] = None
+        self.serial_port: serial.Serial | None = None
         self.lock = threading.RLock()
 
         # State tracking
         self.is_connected = False
         self.is_running = False
-        self.connection_start_time: Optional[float] = None
-        self.last_error: Optional[str] = None
+        self.connection_start_time: float | None = None
+        self.last_error: str | None = None
         self.error_count = 0
         self.reconnect_count = 0
 
         # Threads
-        self.read_thread: Optional[threading.Thread] = None
-        self.monitor_thread: Optional[threading.Thread] = None
+        self.read_thread: threading.Thread | None = None
+        self.monitor_thread: threading.Thread | None = None
 
         # Raw stream listeners (each is a queue.Queue of bytes objects)
-        self._raw_listeners: List[queue.Queue] = []
+        self._raw_listeners: list[queue.Queue] = []
         self._raw_listeners_lock = threading.Lock()
 
     # ---------------------- Lifecycle ----------------------
@@ -71,8 +70,7 @@ class SerialManager:
             logger.warning("Serial manager already running")
             return
         self.is_running = True
-        self.monitor_thread = threading.Thread(target=self._monitor_loop,
-                                               daemon=True)
+        self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
         logger.info(f"Serial manager started for port {self.port}")
 
@@ -150,8 +148,7 @@ class SerialManager:
                 logger.info(f"Connected to {self.port}")
                 if self.read_thread and self.read_thread.is_alive():
                     self.read_thread.join(timeout=2)
-                self.read_thread = threading.Thread(target=self._read_loop,
-                                                    daemon=True)
+                self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
                 self.read_thread.start()
                 return True
         except SerialException as e:
@@ -203,7 +200,8 @@ class SerialManager:
         line_buffer = b""
         # UTF-8 decoder state to handle multi-byte sequences across chunks
         import codecs
-        utf8_decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+
+        utf8_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         last_data_time = time.time()
         partial_line_timeout = 1.0
         connection_stable_time = time.time() + 0.5  # Grace period for device initialization
@@ -224,12 +222,13 @@ class SerialManager:
                     # Many devices send null bytes, initialization sequences, or garbage
                     # when first connecting. Wait for connection to stabilize.
                     current_time = time.time()
-                    if current_time < connection_stable_time:
-                        # During grace period, filter out suspicious patterns
+                    if current_time < connection_stable_time and all(
+                        b == 0 or (b < 0x20 and b not in (0x08, 0x09, 0x0A, 0x0D, 0x1B)) for b in chunk
+                    ):
+                        # During grace period, filter out garbage bytes
                         # Keep printable ASCII, common control chars, and valid UTF-8
-                        if all(b == 0 or (b < 0x20 and b not in (0x08, 0x09, 0x0A, 0x0D, 0x1B)) for b in chunk):
-                            logger.debug(f"Filtered {len(chunk)} garbage bytes during connection init")
-                            continue
+                        logger.debug(f"Filtered {len(chunk)} garbage bytes during connection init")
+                        continue
 
                     # Broadcast raw chunk BEFORE line parsing
                     self._broadcast_raw(chunk)
@@ -237,13 +236,13 @@ class SerialManager:
                     last_data_time = current_time
 
                     # Process complete lines
-                    while b'\n' in line_buffer or b'\r' in line_buffer:
-                        if b'\r\n' in line_buffer:
-                            line, line_buffer = line_buffer.split(b'\r\n', 1)
-                        elif b'\n' in line_buffer:
-                            line, line_buffer = line_buffer.split(b'\n', 1)
-                        elif b'\r' in line_buffer:
-                            line, line_buffer = line_buffer.split(b'\r', 1)
+                    while b"\n" in line_buffer or b"\r" in line_buffer:
+                        if b"\r\n" in line_buffer:
+                            line, line_buffer = line_buffer.split(b"\r\n", 1)
+                        elif b"\n" in line_buffer:
+                            line, line_buffer = line_buffer.split(b"\n", 1)
+                        elif b"\r" in line_buffer:
+                            line, line_buffer = line_buffer.split(b"\r", 1)
                         else:
                             break
                         if line:
@@ -252,9 +251,8 @@ class SerialManager:
                                 decoded = utf8_decoder.decode(line, final=False)
                                 if decoded:
                                     # Strip any remaining control characters except common ones
-                                    decoded = ''.join(
-                                        c for c in decoded
-                                        if c >= ' ' or c in '\t\n\r\x1b' or ord(c) >= 0x80
+                                    decoded = "".join(
+                                        c for c in decoded if c >= " " or c in "\t\n\r\x1b" or ord(c) >= 0x80
                                     )
                                     if decoded:
                                         self.buffer_manager.append(decoded)
@@ -275,10 +273,7 @@ class SerialManager:
                             utf8_decoder.reset()
                             if decoded:
                                 # Strip control characters
-                                decoded = ''.join(
-                                    c for c in decoded
-                                    if c >= ' ' or c in '\t\n\r\x1b' or ord(c) >= 0x80
-                                )
+                                decoded = "".join(c for c in decoded if c >= " " or c in "\t\n\r\x1b" or ord(c) >= 0x80)
                                 if decoded:
                                     self.buffer_manager.append(decoded)
                                     logger.debug(f"Buffered partial line (no raw re-broadcast): {decoded[:100]}")
@@ -306,28 +301,28 @@ class SerialManager:
     # ---------------------- Writing ----------------------
     def write(self, data: str, add_newline: bool = True) -> dict:
         if not self.is_connected:
-            return {'success': False, 'error': 'Not connected', 'bytes_written': 0}
+            return {"success": False, "error": "Not connected", "bytes_written": 0}
         try:
             with self.lock:
                 if not self.serial_port or not self.serial_port.is_open:
-                    return {'success': False, 'error': 'Serial port not open', 'bytes_written': 0}
+                    return {"success": False, "error": "Serial port not open", "bytes_written": 0}
                 write_data = data
-                if add_newline and not write_data.endswith('\n') and not write_data.endswith('\r\n'):
-                    write_data += '\r\n'
-                bytes_written = self.serial_port.write(write_data.encode('utf-8'))
+                if add_newline and not write_data.endswith("\n") and not write_data.endswith("\r\n"):
+                    write_data += "\r\n"
+                bytes_written = self.serial_port.write(write_data.encode("utf-8"))
                 self.serial_port.flush()
-                return {'success': True, 'bytes_written': bytes_written, 'data_sent': write_data}
+                return {"success": True, "bytes_written": bytes_written, "data_sent": write_data}
         except SerialException as e:
             self.last_error = str(e)
             self.error_count += 1
             logger.error(f"Serial write error: {e}")
             self.is_connected = False
-            return {'success': False, 'error': str(e), 'bytes_written': 0}
+            return {"success": False, "error": str(e), "bytes_written": 0}
         except Exception as e:
             self.last_error = str(e)
             self.error_count += 1
             logger.error(f"Unexpected write error: {e}")
-            return {'success': False, 'error': str(e), 'bytes_written': 0}
+            return {"success": False, "error": str(e), "bytes_written": 0}
 
     # ---------------------- Reconnect & Status ----------------------
     def reconnect(self) -> dict:
@@ -335,7 +330,7 @@ class SerialManager:
         self._disconnect()
         time.sleep(0.5)
         success = self._connect()
-        return {'success': success, 'connected': self.is_connected, 'error': self.last_error if not success else None}
+        return {"success": success, "connected": self.is_connected, "error": self.last_error if not success else None}
 
     def get_status(self) -> dict:
         with self.lock:
@@ -343,14 +338,14 @@ class SerialManager:
             if self.connection_start_time:
                 uptime = round(time.time() - self.connection_start_time, 2)
             return {
-                'connected': self.is_connected,
-                'port': self.port,
-                'baudrate': self.baudrate,
-                'bytesize': self.bytesize,
-                'parity': self.parity,
-                'stopbits': self.stopbits,
-                'uptime_seconds': uptime,
-                'error_count': self.error_count,
-                'reconnect_count': self.reconnect_count,
-                'last_error': self.last_error,
+                "connected": self.is_connected,
+                "port": self.port,
+                "baudrate": self.baudrate,
+                "bytesize": self.bytesize,
+                "parity": self.parity,
+                "stopbits": self.stopbits,
+                "uptime_seconds": uptime,
+                "error_count": self.error_count,
+                "reconnect_count": self.reconnect_count,
+                "last_error": self.last_error,
             }
