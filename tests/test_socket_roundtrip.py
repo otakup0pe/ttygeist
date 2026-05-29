@@ -36,13 +36,37 @@ class FakeSerialManager:
         return {"success": True, "bytes_written": len(data), "data_sent": data}
 
 
+class FakeDeviceEntry:
+    """Minimal stand-in for DeviceEntry."""
+
+    def __init__(self, name, buffer_manager, serial_manager):
+        self.name = name
+        self.buffer_manager = buffer_manager
+        self.serial_manager = serial_manager
+
+    @property
+    def connected(self):
+        return self.serial_manager.is_connected
+
+
+class FakeDeviceRegistry:
+    """Minimal stand-in for DeviceRegistry that returns a single device."""
+
+    def __init__(self, buffer_manager, serial_manager):
+        self._entry = FakeDeviceEntry("test", buffer_manager, serial_manager)
+
+    def resolve(self, name=None):
+        return self._entry
+
+
 @pytest.fixture()
 def socket_pair(tmp_path):
     """Start a SocketServer and yield a connected SocketClient, then clean up."""
     sock_path = str(tmp_path / "test.sock")
     buf = BufferManager(max_size_bytes=4096, line_limit=100)
     serial_mgr = FakeSerialManager()
-    server = SocketServer(sock_path, buf, serial_mgr)
+    registry = FakeDeviceRegistry(buf, serial_mgr)
+    server = SocketServer(sock_path, registry)
     server.start()
 
     # Give the server thread a moment to bind
@@ -115,7 +139,8 @@ class TestServerLifecycle:
         sock_path = str(tmp_path / "lifecycle.sock")
         buf = BufferManager(max_size_bytes=1024, line_limit=10)
         serial_mgr = FakeSerialManager()
-        server = SocketServer(sock_path, buf, serial_mgr)
+        registry = FakeDeviceRegistry(buf, serial_mgr)
+        server = SocketServer(sock_path, registry)
         server.start()
         time.sleep(0.1)
         assert os.path.exists(sock_path)

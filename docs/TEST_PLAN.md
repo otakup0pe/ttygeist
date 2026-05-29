@@ -12,7 +12,7 @@ response via `serial_read` or `buffer_inspect` and checks for expected output.
 - ttygeist is running and connected to a CircuitPython device over USB serial.
 - The device is at a REPL prompt (`>>>`). If not, send Ctrl+C first (see Test 0).
 - You have access to the ttygeist MCP tools: `serial_write`, `serial_read`,
-  `serial_status`, `buffer_inspect`, `buffer_clear`, `serial_reconnect`.
+  `serial_status`, `buffer_inspect`, `buffer_clear`, `serial_control`.
 
 ## How to Use This Plan
 
@@ -159,12 +159,12 @@ Wait briefly, then call `serial_read` with `lines: 5`.
 
 ## Test 9: Reconnect
 
-Verify the reconnect tool works without losing the device.
+Verify the reconnect action works without losing the device.
 
-**Action**: Call `serial_reconnect`. Wait a few seconds for the reconnection
-cycle to complete. Then call `serial_status`.
+**Action**: Call `serial_control(action="reconnect")`. Wait a few seconds for
+the reconnection cycle to complete. Then call `serial_status`.
 
-**Expected**: `serial_reconnect` returns a success message. After waiting,
+**Expected**: `serial_control` returns a success message. After waiting,
 `serial_status` shows `connected: true`.
 
 **Pass**: Connection is re-established. Note that the REPL may have reset --

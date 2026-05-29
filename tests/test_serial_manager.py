@@ -375,3 +375,78 @@ class TestReconnect:
         mgr = _make_manager()
         result = mgr.reconnect()
         assert result["success"] is False
+
+
+# ---------------------- Suspend / Resume ----------------------
+
+
+class TestSuspendResume:
+    def test_suspend_disconnects_and_sets_flag(self, connected_manager):
+        mgr, mock_port = connected_manager
+        result = mgr.suspend()
+        assert result["success"] is True
+        assert result["already_suspended"] is False
+        assert result["connected"] is False
+        assert mgr._suspended is True
+        assert mgr.is_connected is False
+        mock_port.close.assert_called_once()
+
+    def test_suspend_idempotent(self, connected_manager):
+        mgr, _ = connected_manager
+        mgr.suspend()
+        result = mgr.suspend()
+        assert result["success"] is True
+        assert result["already_suspended"] is True
+
+    @patch("ttygeist.serial_manager.serial.Serial")
+    def test_resume_reconnects_and_clears_flag(self, mock_serial_cls):
+        mock_port = _fake_serial()
+        mock_serial_cls.return_value = mock_port
+        mgr = _make_manager()
+        mgr._suspended = True
+        result = mgr.resume()
+        assert result["success"] is True
+        assert result["connected"] is True
+        assert mgr._suspended is False
+
+    def test_resume_when_not_suspended(self, connected_manager):
+        mgr, _ = connected_manager
+        result = mgr.resume()
+        assert result["success"] is True
+        assert result["already_resumed"] is True
+
+    @patch("ttygeist.serial_manager.serial.Serial")
+    def test_resume_failure(self, mock_serial_cls):
+        mock_serial_cls.side_effect = SerialException("gone")
+        mgr = _make_manager()
+        mgr._suspended = True
+        result = mgr.resume()
+        assert result["success"] is False
+        assert mgr._suspended is False  # Flag cleared even on failure
+
+    def test_monitor_loop_skips_reconnect_while_suspended(self):
+        """Monitor loop should not attempt connection while suspended."""
+        mgr = _make_manager()
+        mgr.is_running = True
+        mgr._suspended = True
+        mgr.is_connected = False
+
+        # Run one iteration of the monitor loop logic manually.
+        # If suspended, it should sleep and continue, not call _connect.
+        with patch.object(mgr, "_connect") as mock_connect:
+            # Simulate one loop pass: suspended check -> sleep -> stop
+            original_sleep = time.sleep
+
+            call_count = 0
+
+            def counting_sleep(duration):
+                nonlocal call_count
+                call_count += 1
+                if call_count >= 2:
+                    mgr.is_running = False
+                original_sleep(0.01)
+
+            with patch("ttygeist.serial_manager.time.sleep", side_effect=counting_sleep):
+                mgr._monitor_loop()
+
+            mock_connect.assert_not_called()

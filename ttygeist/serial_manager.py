@@ -64,6 +64,10 @@ class SerialManager:
         self.read_thread: threading.Thread | None = None
         self.monitor_thread: threading.Thread | None = None
 
+        # Suspend flag: when True, monitor loop will not auto-reconnect.
+        # Used to release the port for external tools (e.g. esptool).
+        self._suspended = False
+
         # Raw stream listeners (each is a queue.Queue of bytes objects)
         self._raw_listeners: list[queue.Queue] = []
         self._raw_listeners_lock = threading.Lock()
@@ -183,6 +187,9 @@ class SerialManager:
     def _monitor_loop(self):
         current_delay = self.reconnect_delay
         while self.is_running:
+            if self._suspended:
+                time.sleep(1)
+                continue
             if not self.is_connected:
                 if self._connect():
                     current_delay = self.reconnect_delay
@@ -333,6 +340,32 @@ class SerialManager:
             return {"success": False, "error": str(e), "bytes_written": 0}
 
     # ---------------------- Reconnect & Status ----------------------
+    def suspend(self) -> dict:
+        """Release serial port for external tool use (e.g. esptool flash).
+
+        Sets a flag that prevents the monitor loop from auto-reconnecting,
+        then disconnects the port. The MCP server stays running and the
+        buffer is preserved. Call resume() to re-acquire the port.
+        """
+        if self._suspended:
+            return {"success": True, "already_suspended": True, "connected": False}
+        logger.info("Suspending serial port for external tool use")
+        self._suspended = True
+        self._disconnect()
+        return {"success": True, "already_suspended": False, "connected": False}
+
+    def resume(self) -> dict:
+        """Re-acquire serial port after external tool use.
+
+        Clears the suspend flag and reconnects immediately.
+        """
+        if not self._suspended:
+            return {"success": True, "already_resumed": True, "connected": self.is_connected}
+        logger.info("Resuming serial port after external tool use")
+        self._suspended = False
+        success = self._connect()
+        return {"success": success, "connected": self.is_connected, "error": self.last_error if not success else None}
+
     def reconnect(self) -> dict:
         logger.info("Manual reconnection requested")
         self._disconnect()

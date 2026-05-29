@@ -15,18 +15,36 @@ logger = logging.getLogger(__name__)
 class SocketServer:
     """Unix socket server for local IPC.
 
+    Resolves device managers through the DeviceRegistry on each request,
+    so hot-plug and unplug are handled automatically.
+
     Supports two streaming modes:
     - buffer_stream: line-oriented updates via the line buffer
     - raw_stream: raw byte chunks as they arrive (for interactive terminal)
     """
 
-    def __init__(self, socket_path: str, buffer_manager, serial_manager):
+    def __init__(self, socket_path: str, device_registry):
         self.socket_path = socket_path
-        self.buffer_manager = buffer_manager
-        self.serial_manager = serial_manager
+        self.device_registry = device_registry
         self.server_socket: socket.socket | None = None
         self.running = False
         self.server_thread: threading.Thread | None = None
+
+    def _resolve_device(self):
+        """Resolve the current device's managers via the registry.
+
+        Returns (buffer_manager, serial_manager) or raises RuntimeError.
+        """
+        from ttygeist.device_registry import AmbiguousDeviceError, DeviceNotFoundError
+
+        try:
+            entry = self.device_registry.resolve(None)
+        except (DeviceNotFoundError, AmbiguousDeviceError) as e:
+            raise RuntimeError(str(e)) from e
+
+        if entry.buffer_manager is None:
+            raise RuntimeError(f"Device '{entry.name}' has no buffer")
+        return entry.buffer_manager, entry.serial_manager
 
     # ---------------------- Lifecycle ----------------------
     def start(self):
@@ -158,8 +176,9 @@ class SocketServer:
         req_id = request.get("id")
         try:
             if method == "buffer_inspect":
+                buf, _ = self._resolve_device()
                 tail_lines = params.get("tail_lines", 32)
-                lines = self.buffer_manager.read_tail(tail_lines)
+                lines = buf.read_tail(tail_lines)
                 result = {"lines": [line.data + "\n" for line in lines], "count": len(lines)}
                 return {"result": result, "error": None, "id": req_id}
             if method == "buffer_stream":
@@ -169,8 +188,9 @@ class SocketServer:
                 self._stream_raw(client_socket, req_id)
                 return None
             if method == "serial_status":
-                status = self.serial_manager.get_status()
-                buffer_stats = self.buffer_manager.get_stats()
+                buf, sm = self._resolve_device()
+                status = sm.get_status()
+                buffer_stats = buf.get_stats()
                 result = {
                     "connected": status["connected"],
                     "port": status["port"],
@@ -183,9 +203,10 @@ class SocketServer:
                 }
                 return {"result": result, "error": None, "id": req_id}
             if method == "serial_write":
+                _, sm = self._resolve_device()
                 data = params.get("data", "")
                 add_nl = params.get("add_newline", True)
-                result = self.serial_manager.write(data, add_nl)
+                result = sm.write(data, add_nl)
                 return {"result": result, "error": None, "id": req_id}
             return {"result": None, "error": f"Unknown method: {method}", "id": req_id}
         except Exception as e:
@@ -195,7 +216,8 @@ class SocketServer:
     # ---------------------- Streaming helpers ----------------------
     def _stream_buffer(self, client_socket: socket.socket, req_id: Any):
         try:
-            last_count = self.buffer_manager.get_stats()["current_lines"]
+            buf, _ = self._resolve_device()
+            last_count = buf.get_stats()["current_lines"]
             client_socket.setblocking(False)
             while True:
                 # Detect client disconnect without blocking writes forever
@@ -207,10 +229,10 @@ class SocketServer:
                             break  # client hung up
                 except Exception:
                     break
-                current_count = self.buffer_manager.get_stats()["current_lines"]
+                current_count = buf.get_stats()["current_lines"]
                 if current_count > last_count:
                     new_lines = current_count - last_count
-                    all_lines = self.buffer_manager.read_tail(current_count)
+                    all_lines = buf.read_tail(current_count)
                     lines_to_send = all_lines[-new_lines:]
                     for line in lines_to_send:
                         msg = {"stream": line.data + "\n", "id": req_id}
@@ -222,7 +244,8 @@ class SocketServer:
     def _stream_raw(self, client_socket: socket.socket, req_id: Any):
         import queue
 
-        listener_q = self.serial_manager.add_raw_listener()
+        _, sm = self._resolve_device()
+        listener_q = sm.add_raw_listener()
         try:
             while True:
                 try:
@@ -239,4 +262,4 @@ class SocketServer:
         except Exception as e:
             logger.debug(f"Raw stream ended: {e}")
         finally:
-            self.serial_manager.remove_raw_listener(listener_q)
+            sm.remove_raw_listener(listener_q)

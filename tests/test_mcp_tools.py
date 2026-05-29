@@ -2,7 +2,8 @@
 
 These tests exercise the actual async tool wrappers registered on the
 FastMCP instance, with a real BufferManager and a mocked SerialManager.
-No HTTP server is started.
+No HTTP server is started. Uses a single-device config so the device
+parameter is implicit.
 """
 
 import json
@@ -12,11 +13,13 @@ import pytest
 from fastmcp import Client
 
 from ttygeist.buffer_manager import BufferManager
+from ttygeist.config import Config, DeviceConfig
 
 
 def _serial_mock():
     """Create a mock SerialManager with standard return values."""
     mock = MagicMock()
+    mock.is_connected = True
     mock.get_status.return_value = {
         "connected": True,
         "port": "/dev/ttyTEST",
@@ -39,16 +42,16 @@ def _serial_mock():
         "connected": True,
         "error": None,
     }
+    mock.start.return_value = None
+    mock.stop.return_value = None
     return mock
 
 
 async def _call(client, tool_name, **kwargs):
     """Call a tool via the public FastMCP Client API and return the result dict."""
     result = await client.call_tool(tool_name, kwargs or {})
-    # CallToolResult wraps content blocks; extract the dict from text content.
     if result.data is not None:
         return result.data
-    # Fallback: parse first TextContent block
     for block in result.content:
         if hasattr(block, "text"):
             return json.loads(block.text)
@@ -57,51 +60,43 @@ async def _call(client, tool_name, **kwargs):
 
 @pytest.fixture()
 def mcp_env():
-    """Create a FastMCP server with real BufferManager and mocked serial.
+    """Create a FastMCP server with a single-device registry.
 
-    Patches SerialManager and SocketServer so create_mcp_server does not
-    touch real hardware or filesystem. Yields (client, buffer_manager, serial_mock).
+    Uses a real BufferManager and mocked SerialManager. Single device
+    named 'testdev' so the device parameter is implicit in all tools.
     """
     import ttygeist.server as srv
 
     serial_mock = _serial_mock()
     buf = BufferManager(max_size_bytes=4096, line_limit=100)
 
+    # Build a minimal config with one device
+    cfg = Config(
+        devices={"testdev": DeviceConfig(name="testdev", port="/dev/ttyTEST")},
+        server_name="test",
+    )
+
     with (
-        patch.object(srv, "SerialManager", return_value=serial_mock),
+        patch("ttygeist.device_registry.serial.tools.list_ports.comports", return_value=[]),
+        patch("ttygeist.serial_manager.SerialManager", return_value=serial_mock),
         patch.object(srv, "SocketServer") as mock_ss_cls,
         patch("signal.signal"),
         patch("atexit.register"),
     ):
         mock_ss_cls.return_value = MagicMock()
-        cfg = MagicMock()
-        cfg.data = {"server": {"name": "test"}}
-        cfg.buffer_max_size_bytes = 4096
-        cfg.buffer_line_limit = 100
-        cfg.serial_port = "/dev/ttyTEST"
-        cfg.serial_baudrate = 115200
-        cfg.serial_bytesize = 8
-        cfg.serial_parity = "N"
-        cfg.serial_stopbits = 1
-        cfg.serial_timeout = 1.0
-        cfg.serial_write_timeout = 1.0
-        cfg.serial_dtr = True
-        cfg.serial_rts = False
-        cfg.reconnect_delay = 2.0
-        cfg.max_reconnect_delay = 30.0
-        cfg.reconnect_backoff_multiplier = 1.5
-        cfg.socket_path = "/tmp/test.sock"
 
         mcp = srv.create_mcp_server(cfg)
-        # Override buffer_manager with our own so we can prepopulate it
-        srv.buffer_manager = buf
-        client = Client(mcp)
 
+        # Inject our buffer and mock into the registry entry
+        entry = srv.registry.devices["testdev"]
+        entry.buffer_manager = buf
+        entry.serial_manager = serial_mock
+
+        client = Client(mcp)
         yield client, buf, serial_mock
 
     # Reset module globals
-    srv.buffer_manager = None
-    srv.serial_manager = None
+    srv.registry = None
     srv.socket_server = None
     srv._shutdown_executed = False
 
@@ -116,6 +111,7 @@ class TestSerialRead:
         assert result["success"] is True
         assert result["lines_read"] == 2
         assert result["data"][0]["data"] == "line1"
+        assert result["device"] == "testdev"
 
     async def test_read_with_limit(self, mcp_env):
         client, buf, _ = mcp_env
@@ -146,7 +142,7 @@ class TestBufferClear:
             result = await _call(client, "buffer_clear")
         assert result["success"] is True
         assert result["lines_cleared"] == 2
-        assert buf.read() == []
+        assert result["device"] == "testdev"
 
 
 class TestBufferInspect:
@@ -160,6 +156,7 @@ class TestBufferInspect:
         assert result["tail_lines"] == 3
         assert result["data"][0]["data"] == "line2"
         assert result["statistics"]["current_lines"] == 5
+        assert result["device"] == "testdev"
 
 
 class TestSerialWrite:
@@ -169,53 +166,98 @@ class TestSerialWrite:
             result = await _call(client, "serial_write", data="cmd", add_newline=True)
         assert result["success"] is True
         assert result["bytes_written"] == 7
+        assert result["device"] == "testdev"
         serial_mock.write.assert_called_once_with(data="cmd", add_newline=True)
 
     async def test_write_decodes_hex_escape(self, mcp_env):
-        """\\x03 literal string should become byte 0x03 (Ctrl+C)."""
         client, _, serial_mock = mcp_env
         async with client:
             await _call(client, "serial_write", data="\\x03", add_newline=False)
         serial_mock.write.assert_called_once_with(data="\x03", add_newline=False)
 
     async def test_write_decodes_newline_escape(self, mcp_env):
-        """\\n literal string should become a real newline."""
         client, _, serial_mock = mcp_env
         async with client:
             await _call(client, "serial_write", data="hello\\n", add_newline=False)
         serial_mock.write.assert_called_once_with(data="hello\n", add_newline=False)
 
     async def test_write_decodes_unicode_escape(self, mcp_env):
-        """\\u0041 literal string should become 'A'."""
         client, _, serial_mock = mcp_env
         async with client:
             await _call(client, "serial_write", data="\\u0041", add_newline=False)
         serial_mock.write.assert_called_once_with(data="A", add_newline=False)
 
     async def test_write_plain_text_unchanged(self, mcp_env):
-        """Plain text without escape sequences passes through unmodified."""
         client, _, serial_mock = mcp_env
         async with client:
             await _call(client, "serial_write", data="hello world", add_newline=False)
         serial_mock.write.assert_called_once_with(data="hello world", add_newline=False)
 
 
-class TestSerialReconnect:
+class TestSerialControl:
     async def test_reconnect(self, mcp_env):
         client, _, serial_mock = mcp_env
         async with client:
-            result = await _call(client, "serial_reconnect")
+            result = await _call(client, "serial_control", action="reconnect")
         assert result["success"] is True
-        assert result["connected"] is True
+        assert result["action"] == "reconnect"
+        assert result["device"] == "testdev"
         serial_mock.reconnect.assert_called_once()
+
+    async def test_suspend(self, mcp_env):
+        client, _, serial_mock = mcp_env
+        serial_mock.suspend.return_value = {
+            "success": True,
+            "already_suspended": False,
+            "connected": False,
+        }
+        async with client:
+            result = await _call(client, "serial_control", action="suspend")
+        assert result["success"] is True
+        assert result["action"] == "suspend"
+        serial_mock.suspend.assert_called_once()
+
+    async def test_resume(self, mcp_env):
+        client, _, serial_mock = mcp_env
+        serial_mock.resume.return_value = {
+            "success": True,
+            "connected": True,
+            "error": None,
+        }
+        async with client:
+            result = await _call(client, "serial_control", action="resume")
+        assert result["success"] is True
+        assert result["action"] == "resume"
+        serial_mock.resume.assert_called_once()
+
+    async def test_invalid_action(self, mcp_env):
+        client, _, _ = mcp_env
+        async with client:
+            result = await _call(client, "serial_control", action="explode")
+        assert result["success"] is False
+        assert "Unknown action" in result["error"]
 
 
 class TestSerialStatus:
-    async def test_status(self, mcp_env):
+    async def test_single_device_status(self, mcp_env):
         client, _, serial_mock = mcp_env
         async with client:
             result = await _call(client, "serial_status")
+        assert result["success"] is True
+        assert result["device"] == "testdev"
         assert result["serial"]["connected"] is True
-        assert result["serial"]["port"] == "/dev/ttyTEST"
         assert "current_lines" in result["buffer"]
-        serial_mock.get_status.assert_called_once()
+
+    async def test_explicit_device_name(self, mcp_env):
+        client, _, _ = mcp_env
+        async with client:
+            result = await _call(client, "serial_status", device="testdev")
+        assert result["success"] is True
+        assert result["device"] == "testdev"
+
+    async def test_unknown_device(self, mcp_env):
+        client, _, _ = mcp_env
+        async with client:
+            result = await _call(client, "serial_status", device="nosuchdevice")
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()

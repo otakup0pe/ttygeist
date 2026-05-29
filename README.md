@@ -4,201 +4,214 @@
 
 ## Overview
 
-ttygeist manages a single serial connection allowing both human and llm access via mcp. the server is accessible via http(s) or stdio. the human component has minimal interference and basic ansi code support. serial output will be (line) buffered even if a human or llm is not directly interacting with the serial device.
+ttygeist manages a single serial connection allowing both human and
+llm access via mcp. The server is accessible via http(s) or stdio. The
+human component has minimal interference and basic ansi code
+support. Serial output will be (line) buffered even if a human or llm
+is not directly interacting with the serial device.
+
+Devices are discovered automatically via USB enumeration. An accept
+list pins serial numbers to friendly names with optional per-device
+overrides. A block list excludes unwanted ports.
 
 ## Installation
 
-The use of [uv](https://docs.astral.sh/uv/) is recommended because it is the bees knees.
+[uv](https://docs.astral.sh/uv/) is recommended.
 
 ```bash
-$ cd ~/src/otakup0pe-ttygeist
-$ uv sync
-$ uv run ttygeist            # STDIO mode (default)
-$ uv run ttygeist -- --transport http   # HTTP(S) mode
-```
-
-Environment override alternative:
-```bash
-$ export TTYGEIST_TRANSPORT=http
-$ uv run ttygeist
+cd ~/src/otakup0pe-ttygeist
+uv sync
+uv run ttygeist            # STDIO mode (default)
+uv run ttygeist --transport http   # HTTP(S) mode
 ```
 
 ## Configuration
 
-ttygeist loads configuration from a YAML file passed via `--config` (or `-c`). When no file is provided, sensible defaults are used for every key -- no config file is required to get started. This default config file should work with (at least some) CircuitPython esp32 devices.
+ttygeist loads config from a YAML file passed via `--config` (default:
+`config.yaml`). No config file is required -- with no config, ttygeist
+discovers all serial ports and auto-names them.
 
-### Config Reference
+### Minimal Config (accept list)
+
+Name specific devices by USB serial number:
 
 ```yaml
-serial:
-  port: /dev/ttyUSB0           # serial device path
-  baudrate: 115200
-  bytesize: 8                  # 5, 6, 7, or 8
-  parity: "N"                  # N, E, O, M, S
-  stopbits: 1                  # 1, 1.5, or 2
-  timeout: 1.0                 # read timeout (seconds)
-  write_timeout: 1.0           # write timeout (seconds)
-  dtr: true                    # assert DTR
-  rts: false                   # assert RTS
-  reconnect_delay: 2.0         # initial reconnect wait (seconds)
-  max_reconnect_delay: 30.0    # cap for exponential backoff
-  reconnect_backoff_multiplier: 1.5
-
-buffer:
-  max_size_mb: 10              # max buffer memory
-  line_limit: 100000           # max buffered lines (FIFO overflow)
-  overflow: fifo               # overflow strategy
-
-server:
-  name: ttygeist               # MCP server name
-  transport: stdio             # "http" or "stdio"
-  host: 127.0.0.1              # bind address (http only)
-  port: 8443                   # bind port (http only)
-  tls_cert: cert.pem           # TLS certificate path (http only)
-  tls_key: key.pem             # TLS key path (http only)
-
-socket:
-  path: "~/tmp/ttygeist-{pid}.sock"  # Unix socket for CLI; {pid} is expanded
-
-logging:
-  file: ttygeist.log
-  level: INFO                  # DEBUG, INFO, WARNING, ERROR, CRITICAL
-  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-  max_size_mb: 50              # 0 = no rotation
-  backup_count: 3
-  request_log: false           # per-request DEBUG logging
-
-auth:
-  api_keys: []                 # list of valid API keys
-  header_name: X-API-Key       # or "Authorization" for Bearer format
-  allow_anon: false            # bypass auth (local dev only)
+devices:
+  devboard: "AB:CD:EF:12:34:56"
+  radio: "78:90:AB:CD:EF:12"
 ```
 
-Only include keys you want to override -- missing keys fall back to the defaults shown above.
+### Extended Config
+
+Per-device overrides and block list:
+
+```yaml
+devices:
+  devboard:
+    serial: "AB:CD:EF:12:34:56"
+    baud: 460800
+
+  radio: "78:90:AB:CD:EF:12"
+
+  # Non-USB device (explicit port path)
+  gps:
+    port: "/dev/ttyS1"
+    baud: 9600
+
+# Ignore specific serial numbers
+block:
+  - "AA:BB:CC:DD:EE:FF"
+
+# Override global defaults
+defaults:
+  baud: 115200
+  dtr: true
+  rts: false
+
+# Disable tools you don't need
+disabled_tools:
+  - server_shutdown
+
+# Firmware identification (optional, regex patterns)
+firmware_patterns:
+  - pattern: "Version:\\s*(.+)"
+    field: firmware_version
+  - pattern: "MyDevice Boot"
+    product: mydevice
+
+buffer:
+  max_size_mb: 10
+  line_limit: 100000
+
+server:
+  name: ttygeist
+  transport: stdio
+
+logging:
+  target: journal          # "journal" (systemd) or "file"
+  file: ttygeist.log       # only used when target=file
+  level: INFO
+```
+
+Short form (`name: "serial_number"`) and extended form (`name: {serial: "...", baud: ...}`) can be mixed freely.
+
+### Chipset Defaults
+
+ttygeist attempts sensible configuration based on USB chipset
+(VID/PID). Per-device config overrides these:
+
+| Chipset | VID:PID | Default baud | DTR | RTS |
+|---------|---------|-------------|-----|-----|
+| Espressif USB-JTAG | 303a:1001 | 115200 | on | off |
+| CH340/CH341 | 1a86:7523 | 115200 | on | on |
+| CP2102/CP2104 | 10c4:ea60 | 115200 | on | on |
+| FTDI FT232R | 0403:6001 | 115200 | on | on |
 
 ### Environment Variable Overrides
 
 | Variable | Overrides | Notes |
 |---|---|---|
-| `TTYGEIST_PORT` | `serial.port` | |
 | `TTYGEIST_API_KEYS` | `auth.api_keys` | Comma-separated; appended to file keys |
 | `TTYGEIST_AUTH_HEADER` | `auth.header_name` | `X-API-Key` or `Authorization` |
-| `TTYGEIST_ALLOW_ANON` | `auth.allow_anon` | `1`, `true`, or `yes` to enable |
-| `TTYGEIST_REQUEST_LOG` | `logging.request_log` | `1`, `true`, or `yes` to enable |
+| `TTYGEIST_ALLOW_ANON` | `auth.allow_anon` | `1`, `true`, or `yes` |
+| `TTYGEIST_REQUEST_LOG` | `logging.request_log` | `1`, `true`, or `yes` |
 | `TTYGEIST_TRANSPORT` | `server.transport` | `http` or `stdio` |
+
+### Setup Workflow
+
+1. Plug in devices
+2. Start ttygeist with no config
+3. Call `serial_status` -- shows all discovered devices with serial numbers
+4. Copy serial numbers into config, assign friendly names
+5. Restart ttygeist -- devices matched by serial number, named as configured
 
 ## Authentication
 
-By default all HTTP access requires an API key.
+HTTP transport requires API keys by default. Configure in
+`auth.api_keys` or via `TTYGEIST_API_KEYS`. Supports `X-API-Key` and
+`Authorization: Bearer` headers. Set `allow_anon: true` for local dev
+only.
 
-Configure one or more keys in config.yaml under auth.api_keys or via `TTYGEIST_API_KEYS` (comma separated).
+STDIO transport does not use authentication.
 
-Two header styles are supported:
-1. `X-API-Key: <key>`
-2. `Authorization: Bearer <key>` (set auth.header_name to "Authorization" or export `TTYGEIST_AUTH_HEADER=Authorization`)
-
-Example (custom header):
-```bash
-curl -s -k \
-  -H 'X-API-Key: your-api-key-1' \
-  https://127.0.0.1:8443/
-```
-
-Example (Bearer):
-```bash
-curl -s -k \
-  -H 'Authorization: Bearer your-api-key-1' \
-  https://127.0.0.1:8443/
-```
-
-Anonymous access
-----------------
-Set allow_anon: true (or export `TTYGEIST_ALLOW_ANON=1`) to run without auth middleware for local development. Do NOT enable in any untrusted environment.
-
-
-## CLI Usage (ttygeist-cli)
-
-Commands operate via the Unix socket and share the YAML config for socket path resolution.
-
-### Show buffer
+## CLI Usage
 
 ```bash
-$ ttygeist-cli show -n 50
+ttygeist-cli status           # connection and buffer stats
+ttygeist-cli show -n 50       # last 50 buffered lines
+ttygeist-cli tail -n 20       # live tail
+ttygeist-cli terminal -n 10   # interactive terminal (exit: Ctrl+])
 ```
 
-### Tail serial output
+The CLI shares serial access with MCP clients. Output is visible to
+both simultaneously. The CLI is only accessible on the host ttygeist
+is running on.
 
-```bash
-$ ttygeist-cli tail -n 20
-```
+## MCP Tools
 
-### Show connection / buffer status
-
-```bash
-$ ttygeist-cli status
-```
-
-### Interactive terminal
-
-```bash
-$ ttygeist-cli terminal -n 10
-```
-
-The terminal is shared between the operator and the agent(s). Raw output appears immediately, although keystrokes are batched to enable coordinating. Control bytes (except for CR/LF) are flushed immediately, which should allow text user interface interactions.
-
-Terminal can be exited with `Ctrl+]`, which restores terminal, and does not interfere with agent access.
-
-## MCP Transport Modes
-
-Two transport modes are supported:
-
-1. STDIO (default)
-   - Launches MCP over process stdin/stdout (suitable for desktop MCP clients like Claude Desktop).
-   - Start: `uv run ttygeist`
-   - Ignores HTTP-specific settings (host, port, tls_*). Auth headers are not used.
-   - API keys / anonymous access are not relevant; the client already controls the local process.
-
-2. HTTP(S)
-   - Configure TLS cert/key in config.yaml (server.tls_cert / server.tls_key)
-   - Requires API key unless allow_anon: true.
-   - Start: `uv run ttygeist -- --transport http` or set `TTYGEIST_TRANSPORT=http`.
-
-## MCP Tool Reference
-
-### serial_read
-
-* Read buffered lines by count or time slice.
-* Parameters: lines (int), duration_seconds (float), clear_after_read (bool).
-
-### serial_write
-
-* Write UTF-8 data (may include control characters) to device.
-* Parameters: data (string), add_newline (bool; appends CRLF if true and not already present).
+All tools accept an optional `device` parameter. When only one device is connected, `device` can be omitted.
 
 ### serial_status
 
-* Connection metadata and buffer statistics snapshot.
+Get device status. With no `device` argument and multiple devices
+connected, returns an overview of all devices including port,
+connection state, USB info, and firmware identification.
+
+### serial_read
+
+Read buffered lines by count (`lines`) or time window
+(`duration_seconds`). Optional `clear_after_read`.
+
+### serial_write
+
+Write data to a device. Escape sequences (`\x03`, `\n`) are decoded
+from JSON-RPC strings automatically. Optional `add_newline` (default:
+true).
 
 ### buffer_inspect
 
-* Non-destructive tail view of recent lines (tail_lines parameter).
+Non-destructive tail view of recent lines (`tail_lines` parameter, default 50).
 
 ### buffer_clear
 
-* Removes all currently buffered lines; returns count cleared.
+Remove all buffered lines for a device. Returns count cleared.
 
-### serial_reconnect
+### serial_control
 
-* Forces disconnect + reconnect attempt with fresh timing.
+Control a device's serial connection:
+- `reconnect` -- force disconnect + reconnect
+- `suspend` -- release the port for external tools (e.g. esptool
+  flash). Server stays running, buffer preserved, auto-reconnect
+  disabled.
+- `resume` -- re-acquire port after external tool use. Background scan
+  picks up any port path changes.
+
+### server_shutdown
+
+Cooperative shutdown request.
+
+## Logging
+
+Default logging target is systemd journal (`python-systemd`
+JournalHandler). Falls back to file logging if `python-systemd` is not
+installed. Set `logging.target: file` to use file logging explicitly.
+
+## Transport Modes
+
+- **STDIO** (default): MCP over stdin/stdout. No auth needed.
+- **HTTP(S)**: TLS required. Configure cert/key in `server.tls_cert` / `server.tls_key`.
 
 ## License
 
-Licensed under the BSD License. See the [LICENSE](https://github.com/otakup0pe/ttygeist/blob/master/LICENSE) file for details.
+Licensed under the BSD License. See [LICENSE](https://github.com/otakup0pe/ttygeist/blob/mainline/LICENSE).
 
 ## Feedback, bug-reports, requests, ...
 
-Are [welcome](https://github.com/otakup0pe/ttygeist/issues)!
+Are [Welcome](https://github.com/otakup0pe/ttygeist/issues)!
 
 ## Author
 
-The `ttygeist` tool was created by [Jonathan Freedman](https://jonathanfreedman.bio/) to facilitate testing just how many ESP32 devices he seems to be constantly surrounded by. This tool was created with LLM assistance.
+The `ttygeist` tool was created by [Jonathan
+Freedman](https://jonathanfreedman.bio/) to facilitate testing just
+how many ESP32 devices he seems to be constantly surrounded by. This
+tool was created with LLM assistance.

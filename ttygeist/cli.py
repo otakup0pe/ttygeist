@@ -9,7 +9,7 @@ import time
 import tty
 from pathlib import Path
 
-from ttygeist.config import Config
+from ttygeist.config import load_config
 from ttygeist.socket_client import SocketClient
 from ttygeist.terminal_emulator import TerminalEmulator, detect_terminal_capabilities
 
@@ -24,8 +24,8 @@ OPTIONAL_EXIT_KEYS = {
 
 
 def find_socket_path(config_path: str | None = None) -> str:
-    config = Config(config_path)
-    socket_pattern = config.data["socket"]["path"]
+    config = load_config(config_path)
+    socket_pattern = config.socket_path
     socket_pattern = socket_pattern.replace("~", str(Path.home()))
     if "{pid}" in socket_pattern:
         import glob

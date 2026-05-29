@@ -2,32 +2,54 @@
 
 ## Project Overview
 
-ttygeist is a Model Context Protocol (MCP) server for serial port communication.
-It bridges LLMs (via MCP) and human operators (via CLI/Unix socket) to interact
-with a single serial device concurrently. Written in Python 3.10+.
+ttygeist is an MCP server for serial port communication. It discovers and
+manages multiple serial devices concurrently, bridging LLMs (via MCP) and
+human operators (via CLI/Unix socket). Written in Python 3.10+.
 
 See `README.md` for user-facing documentation.
 
 ## Architecture
 
+```
+LLM (MCP STDIO/HTTP) -> MCP tool handlers -> device_registry -> per-device buffer/serial
+CLI (Unix socket)     -> socket_server     -> serial_manager (writes) & buffer_manager
+Serial device(s)     <-> serial_manager(s) -> raw listeners & line buffers
+```
+
 High-level components:
 
-* `server.py`: FastMCP server, MCP tool definitions, signal handling, HTTP/STDIO transports.
-* `serial_manager.py`: pyserial connection with auto-reconnect, threading, raw byte streaming.
-* `buffer_manager.py`: thread-safe circular buffer (deque) with FIFO overflow.
-* `socket_server.py` / `socket_client.py`: Unix socket IPC for CLI communication.
-* `cli.py`: human CLI interface (show, tail, status, terminal commands).
-* `auth.py`: ASGI middleware for API key auth (constant-time comparison, HTTP transport only).
-* `terminal_emulator.py`: ANSI/VT100 escape sequence state machine for display cleanup.
-* `config.py`: YAML config + env var overrides, sensible defaults for all keys.
+* `config.py`: YAML config parser. Device accept/block lists, chipset defaults,
+  disabled_tools, firmware_patterns. Dataclass-based (no class methods).
+* `device_registry.py`: `DeviceRegistry` manages named `DeviceEntry` instances,
+  each with its own `SerialManager` + `BufferManager`. USB auto-discovery via
+  `serial.tools.list_ports`. Background threads for USB hot-plug scanning and
+  firmware boot log identification.
+* `server.py`: FastMCP server, MCP tool definitions with `device` parameter,
+  signal handling, journald/file logging, HTTP/STDIO transports.
+* `serial_manager.py`: pyserial connection with auto-reconnect, threading,
+  raw byte streaming, suspend/resume for external tool access.
+* `buffer_manager.py`: Thread-safe circular buffer (deque) with FIFO overflow.
+* `socket_server.py` / `socket_client.py`: Unix socket IPC for CLI.
+* `cli.py`: Human CLI interface (show, tail, status, terminal).
+* `auth.py`: ASGI middleware for API key auth (HTTP transport only).
+* `terminal_emulator.py`: ANSI/VT100 escape sequence state machine.
 
-Data flow:
+## Key Design Decisions
 
-```
-LLM (MCP STDIO/HTTP) -> MCP tool handlers -> buffer_manager / serial_manager
-CLI (Unix socket)     -> socket_server     -> serial_manager (writes) & buffer_manager
-Serial device        <-> serial_manager    -> raw listeners & line buffer
-```
+* **Always discover.** ttygeist enumerates all serial ports on startup and
+  periodically. Accept list (named devices) and block list mediate what gets
+  managed. No "modes" to configure.
+* **Device parameter.** All MCP tools accept an optional `device` name. When
+  only one device exists, it is implicit. With multiple devices and no name,
+  tools return an error listing available devices.
+* **Chipset defaults.** VID/PID -> default serial settings (baud, DTR, RTS).
+  Per-device config overrides chipset defaults.
+* **Firmware patterns are config, not code.** Boot log identification patterns
+  are supplied via `firmware_patterns:` in config, not hardcoded.
+* **disabled_tools config.** Users can suppress tool registration for tools
+  they don't need, reducing MCP context footprint.
+* **Journald by default.** Uses `python-systemd` JournalHandler when available,
+  falls back to file logging.
 
 ## Development
 
@@ -45,8 +67,7 @@ uv sync
 make test
 ```
 
-This runs `ruff check`, `ruff format --check`, then `pytest` with a 10 second timeout.
-Lint must pass before tests run.
+Runs `ruff check`, `ruff format --check`, then `pytest` with 10s timeout.
 
 ### Linting
 
@@ -55,29 +76,22 @@ make lint          # check only
 make lint-fix      # auto-fix
 ```
 
-Ruff rules: E, F, W, I, UP, B, SIM. Line length (E501) is ignored.
-Target version is Python 3.10.
+Ruff rules: E, F, W, I, UP, B, SIM. E501 ignored. Target: Python 3.10.
 
 ### CI
 
-GitHub Actions runs lint + test across Python 3.10-3.13 on every push/PR to `mainline`.
-
-## Configuration
-
-All config keys have sensible defaults -- no config file is required. The default
-transport is STDIO. See the Configuration section in `README.md` for the full
-reference of all keys, defaults, and environment variable overrides.
+GitHub Actions: lint + test across Python 3.10-3.13 on push/PR to `mainline`.
 
 ## Code Conventions
 
-* No unicode characters in source files (use ASCII hyphens, not non-breaking hyphens).
-* `asyncio_mode = "auto"` in pytest -- async tests do not need explicit markers.
-* Mocking boundary: pyserial is mocked in tests, buffer_manager is used for real.
-* Socket tests use real Unix sockets in pytest `tmp_path`.
-* Tests use pytest fixtures and `@pytest.mark.parametrize` to reduce duplication.
+* No unicode in source files (ASCII hyphens only).
+* `asyncio_mode = "auto"` in pytest.
+* Mocking boundary: pyserial is mocked, buffer_manager is real.
+* Socket tests use real Unix sockets in `tmp_path`.
+* Config is dataclass-based with `load_config()` free function (not a class with methods).
 
 ## MCP Tools
 
-The server exposes six tools: `serial_read`, `serial_write`, `serial_status`,
-`buffer_inspect`, `buffer_clear`, `serial_reconnect`. See the MCP Tool Reference
-section in `README.md` for parameter details.
+Seven tools: `serial_status`, `serial_read`, `serial_write`, `buffer_inspect`,
+`buffer_clear`, `serial_control`, `server_shutdown`. All accept optional
+`device` parameter. See README.md for details.

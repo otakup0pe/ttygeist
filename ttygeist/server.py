@@ -1,8 +1,9 @@
-"""ttygeist - Main server implementation."""
+"""ttygeist - Multi-device MCP server for serial port communication."""
 
 import argparse
 import asyncio
 import atexit
+import contextlib
 import logging
 import re
 import signal
@@ -12,26 +13,24 @@ from logging.handlers import RotatingFileHandler
 
 from fastmcp import FastMCP
 
-from ttygeist.buffer_manager import BufferManager
-from ttygeist.config import Config
-from ttygeist.serial_manager import SerialManager
+from ttygeist.config import Config, load_config
+from ttygeist.device_registry import (
+    AmbiguousDeviceError,
+    DeviceNotFoundError,
+    DeviceRegistry,
+)
 from ttygeist.socket_server import SocketServer
 
 # Global instances
-config: Config | None = None
-buffer_manager: BufferManager | None = None
-serial_manager: SerialManager | None = None
+registry: DeviceRegistry | None = None
 socket_server: SocketServer | None = None
-
 _shutdown_executed: bool = False
 
-# Regex for Python-style escape sequences that arrive as literal strings
-# from JSON-RPC (e.g. the 4-char string \x03 instead of byte 0x03).
-
+# Regex for Python-style escape sequences from JSON-RPC
 _ESCAPE_RE = re.compile(
-    r"\\x([0-9a-fA-F]{2})"  # \xNN hex byte
-    r"|\\u([0-9a-fA-F]{4})"  # \uNNNN unicode
-    r"|\\([nrtab0\\])"  # \n \r \t \a \b \0 \\
+    r"\\x([0-9a-fA-F]{2})"
+    r"|\\u([0-9a-fA-F]{4})"
+    r"|\\([nrtab0\\])"
 )
 _SIMPLE_ESCAPES = {
     "n": "\n",
@@ -45,12 +44,7 @@ _SIMPLE_ESCAPES = {
 
 
 def _decode_escapes(data: str) -> str:
-    """Decode Python-style escape sequences in a string from JSON-RPC.
-
-    Handles \\xNN (hex byte), \\uNNNN (unicode), and common single-char
-    escapes (\\n, \\r, \\t, \\a, \\b, \\0, \\\\). Leaves unrecognized
-    sequences unchanged.
-    """
+    """Decode Python-style escape sequences in a string from JSON-RPC."""
 
     def _replace(m):
         if m.group(1) is not None:
@@ -63,99 +57,90 @@ def _decode_escapes(data: str) -> str:
 
 
 def setup_logging(config: Config):
-    """Configure logging with file handler."""
+    """Configure logging. Prefers journald, falls back to file."""
     logger = logging.getLogger()
-    logger.setLevel(getattr(logging, config.log_level.upper()))
+    level = getattr(logging, config.log_level.upper())
+    logger.setLevel(level)
 
-    # File handler with rotation
-    file_handler = RotatingFileHandler(
-        config.log_file, maxBytes=config.log_max_size_bytes, backupCount=config.log_backup_count
-    )
-    file_handler.setLevel(getattr(logging, config.log_level.upper()))
+    handler = None
 
-    # Formatter
-    formatter = logging.Formatter(config.log_format)
-    file_handler.setFormatter(formatter)
+    if config.log_target == "journal":
+        try:
+            from systemd.journal import JournalHandler
 
-    logger.addHandler(file_handler)
+            handler = JournalHandler(SYSLOG_IDENTIFIER="ttygeist")
+            handler.setLevel(level)
+        except ImportError:
+            # python-systemd not available, fall back to file
+            pass
 
-    logging.info("Logging configured")
+    if handler is None:
+        # File handler (default fallback or explicit target=file)
+        handler = RotatingFileHandler(
+            config.log_file,
+            maxBytes=config.log_max_size_bytes,
+            backupCount=config.log_backup_count,
+        )
+        handler.setLevel(level)
+        handler.setFormatter(logging.Formatter(config.log_format))
+
+    logger.addHandler(handler)
+    logging.info("Logging configured (target: %s)", config.log_target)
 
 
 def graceful_shutdown(source: str = "unknown"):
-    """Idempotent shutdown for all subsystems.
-
-    Ensures socket + serial manager cleanup regardless of termination path.
-    """
-    global _shutdown_executed, socket_server, serial_manager
+    """Idempotent shutdown for all subsystems."""
+    global _shutdown_executed
     if _shutdown_executed:
         return
     _shutdown_executed = True
-    logging.info(f"Graceful shutdown initiated by {source}")
+    logging.info("Graceful shutdown initiated by %s", source)
     try:
         if socket_server:
-            try:
+            with contextlib.suppress(Exception):
                 socket_server.stop()
-            except Exception as e:
-                logging.error(f"Error stopping socket server: {e}", exc_info=True)
-        if serial_manager:
-            try:
-                serial_manager.stop()
-            except Exception as e:
-                logging.error(f"Error stopping serial manager: {e}", exc_info=True)
+        if registry:
+            registry.stop_background_scan()
+            registry.stop_firmware_monitor()
+            registry.disconnect_all()
     finally:
-        logging.info("ttygeist Server stopped")
+        logging.info("ttygeist stopped")
+
+
+def _resolve_device(device: str | None):
+    """Resolve device name to entry."""
+    return registry.resolve(device)
 
 
 def create_mcp_server(cfg: Config) -> FastMCP:
     """Create and configure the MCP server."""
-    global config, buffer_manager, serial_manager, socket_server
+    global registry, socket_server
 
-    config = cfg
+    registry = DeviceRegistry(cfg)
 
-    # Initialize buffer manager
-    buffer_manager = BufferManager(max_size_bytes=config.buffer_max_size_bytes, line_limit=config.buffer_line_limit)
+    # Initial scan + connect
+    scan_result = registry.connect_all()
+    logging.info("Initial scan: %s", scan_result)
 
-    # Initialize serial manager
-    serial_manager = SerialManager(
-        port=config.serial_port,
-        baudrate=config.serial_baudrate,
-        bytesize=config.serial_bytesize,
-        parity=config.serial_parity,
-        stopbits=config.serial_stopbits,
-        timeout=config.serial_timeout,
-        write_timeout=config.serial_write_timeout,
-        dtr=config.serial_dtr,
-        rts=config.serial_rts,
-        reconnect_delay=config.reconnect_delay,
-        max_reconnect_delay=config.max_reconnect_delay,
-        reconnect_backoff_multiplier=config.reconnect_backoff_multiplier,
-        buffer_manager=buffer_manager,
-    )
+    # Start background threads
+    registry.start_background_scan()
+    registry.start_firmware_monitor()
 
-    # Start serial manager
-    serial_manager.start()
-
-    # Initialize and start socket server
+    # Socket server -- resolves device via registry per-request (hot-plug safe)
     socket_server = SocketServer(
-        socket_path=config.socket_path, buffer_manager=buffer_manager, serial_manager=serial_manager
+        socket_path=cfg.socket_path_expanded,
+        device_registry=registry,
     )
     socket_server.start()
 
-    # Create FastMCP server
-    mcp = FastMCP(config.data["server"]["name"])
+    mcp = FastMCP(cfg.server_name)
+    logging.info("MCP server created; registering tools")
 
-    logging.info("MCP server instance created; registering tools")
-
-    # Register termination hooks now that subsystems exist
+    # Signal handlers
     def _signal_handler(signum, frame):
         sig_name = signal.Signals(signum).name
-        logging.info(f"Received signal {sig_name}; initiating shutdown")
         graceful_shutdown(f"signal {sig_name}")
-        # Exit immediately to ensure client sees termination
         sys.exit(0)
-
-    import contextlib
 
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT):
         with contextlib.suppress(Exception):
@@ -163,298 +148,326 @@ def create_mcp_server(cfg: Config) -> FastMCP:
 
     atexit.register(lambda: graceful_shutdown("atexit"))
 
-    # ---------------- MCP Tools ----------------
+    # ---- Tool registration (respects disabled_tools config) ----
 
-    @mcp.tool()
-    async def server_shutdown() -> dict:
-        """Explicit cooperative shutdown request.
+    def _register(tool_func, name: str | None = None):
+        """Register a tool if not disabled."""
+        tool_name = name or tool_func.__name__
+        if cfg.is_tool_enabled(tool_name):
+            mcp.tool()(tool_func)
+        else:
+            logging.info("Tool '%s' disabled by config", tool_name)
 
-        Allows an MCP client (e.g. Emacs) to request server termination so
-        cleanup happens before the process is killed.
-        """
-        logging.info("server_shutdown tool invoked")
-        graceful_shutdown("tool server_shutdown")
-        # Return success before exit so client gets confirmation
-        # Use asyncio.create_task to exit after response is flushed.
-        asyncio.get_running_loop().call_soon(sys.exit, 0)
-        return {"success": True}
+    # -- serial_status: single device or fleet overview --
 
-    @mcp.tool()
-    async def serial_read(
-        lines: int | None = None, duration_seconds: float | None = None, clear_after_read: bool = False
-    ) -> dict:
-        """
-        Read data from the serial buffer.
+    async def serial_status(device: str | None = None) -> dict:
+        """Get serial port status.
+
+        With no device arg (or multiple devices), returns status for
+        all managed devices. With a device name, returns detailed
+        status for that device.
 
         Args:
-            lines: Number of lines to read (None = all available)
-            duration_seconds: Read data received within last N seconds (overrides lines)
-            clear_after_read: Clear buffer after reading
-
-        Returns:
-            Dictionary with read data and statistics
+            device: Device name. Omit for fleet overview.
         """
         try:
-            logging.info(
-                f"serial_read called: lines={lines}, duration_seconds={duration_seconds}, clear_after_read={clear_after_read}"
+            if device is None and len(registry.devices) != 1:
+                return {"success": True, **registry.status()}
+
+            entry = _resolve_device(device)
+            sm = entry.serial_manager
+            buf = entry.buffer_manager
+
+            serial_info = (
+                await asyncio.wait_for(asyncio.to_thread(sm.get_status), timeout=5.0) if sm else {"connected": False}
             )
 
-            if duration_seconds is not None:
-                # Read lines from specific time period
-                cutoff_time = time.time() - duration_seconds
-                logging.debug(f"Reading all lines and filtering by cutoff_time={cutoff_time}")
-                all_lines = await asyncio.wait_for(
-                    asyncio.to_thread(buffer_manager.read, lines=None, clear_after_read=False), timeout=10.0
-                )
-                filtered_lines = [line for line in all_lines if line.timestamp >= cutoff_time]
-
-                if clear_after_read:
-                    logging.debug("Clearing buffer after read")
-                    await asyncio.wait_for(asyncio.to_thread(buffer_manager.clear), timeout=2.0)
-
-                result = {
-                    "success": True,
-                    "lines_read": len(filtered_lines),
-                    "duration_seconds": duration_seconds,
-                    "data": [line.to_dict() for line in filtered_lines],
-                }
-                logging.info(f"serial_read completed: {len(filtered_lines)} lines")
-                return result
-            else:
-                # Read specific number of lines or all
-                logging.debug(f"Reading {lines if lines else 'all'} lines")
-                read_lines = await asyncio.wait_for(
-                    asyncio.to_thread(buffer_manager.read, lines=lines, clear_after_read=clear_after_read), timeout=10.0
-                )
-
-                result = {
-                    "success": True,
-                    "lines_read": len(read_lines),
-                    "data": [line.to_dict() for line in read_lines],
-                }
-                logging.info(f"serial_read completed: {len(read_lines)} lines")
-                return result
-        except asyncio.TimeoutError:
-            logging.error("serial_read timeout - buffer manager hung")
-            return {
-                "success": False,
-                "error": "Operation timed out - buffer manager may be deadlocked",
-                "lines_read": 0,
-                "data": [],
-            }
-        except Exception as e:
-            logging.error(f"serial_read error: {e}", exc_info=True)
-            return {"success": False, "error": str(e), "lines_read": 0, "data": []}
-
-    @mcp.tool()
-    async def serial_status() -> dict:
-        """
-        Get current serial port connection status and statistics.
-
-        Returns:
-            Dictionary with connection status, configuration, and statistics
-        """
-        try:
-            logging.info("serial_status called")
-            # Add timeout to prevent hanging
-            serial_status = await asyncio.wait_for(asyncio.to_thread(serial_manager.get_status), timeout=5.0)
-            buffer_stats = await asyncio.wait_for(asyncio.to_thread(buffer_manager.get_stats), timeout=2.0)
-
-            result = {"serial": serial_status, "buffer": buffer_stats}
-            logging.info("serial_status completed")
-            return result
-        except asyncio.TimeoutError:
-            logging.error("serial_status timeout - serial manager hung")
-            return {"success": False, "error": "Operation timed out - serial manager may be deadlocked"}
-        except Exception as e:
-            logging.error(f"serial_status error: {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
-
-    @mcp.tool()
-    async def buffer_clear() -> dict:
-        """
-        Clear all buffered serial data.
-
-        Returns:
-            Dictionary with number of lines cleared
-        """
-        try:
-            logging.info("buffer_clear called")
-            lines_cleared = await asyncio.wait_for(asyncio.to_thread(buffer_manager.clear), timeout=5.0)
-
-            result = {"success": True, "lines_cleared": lines_cleared}
-            logging.info(f"buffer_clear completed: {lines_cleared} lines")
-            return result
-        except asyncio.TimeoutError:
-            logging.error("buffer_clear timeout - buffer manager hung")
-            return {
-                "success": False,
-                "error": "Operation timed out - buffer manager may be deadlocked",
-                "lines_cleared": 0,
-            }
-        except Exception as e:
-            logging.error(f"buffer_clear error: {e}", exc_info=True)
-            return {"success": False, "error": str(e), "lines_cleared": 0}
-
-    @mcp.tool()
-    async def buffer_inspect(tail_lines: int = 50) -> dict:
-        """
-        Inspect buffer contents without consuming data.
-
-        Args:
-            tail_lines: Number of recent lines to show (default: 50)
-
-        Returns:
-            Dictionary with buffer statistics and recent lines
-        """
-        try:
-            logging.info(f"buffer_inspect called: tail_lines={tail_lines}")
-            stats = await asyncio.wait_for(asyncio.to_thread(buffer_manager.get_stats), timeout=2.0)
-            recent_lines = await asyncio.wait_for(
-                asyncio.to_thread(buffer_manager.read_tail, lines=tail_lines), timeout=5.0
-            )
+            buffer_info = await asyncio.wait_for(asyncio.to_thread(buf.get_stats), timeout=2.0) if buf else {}
 
             result = {
                 "success": True,
-                "statistics": stats,
-                "tail_lines": len(recent_lines),
-                "data": [line.to_dict() for line in recent_lines],
+                "device": entry.name,
+                "serial": serial_info,
+                "buffer": buffer_info,
             }
-            logging.info(f"buffer_inspect completed: {len(recent_lines)} lines")
+            if entry.usb_info:
+                result["usb"] = entry.usb_info.to_dict()
+            if entry.firmware_info and entry.firmware_info.product:
+                result["firmware"] = entry.firmware_info.to_dict()
             return result
+        except (DeviceNotFoundError, AmbiguousDeviceError) as e:
+            return {"success": False, "error": str(e)}
         except asyncio.TimeoutError:
-            logging.error("buffer_inspect timeout - buffer manager hung")
-            return {
-                "success": False,
-                "error": "Operation timed out - buffer manager may be deadlocked",
-                "tail_lines": 0,
-                "data": [],
-            }
+            return {"success": False, "error": "Operation timed out"}
         except Exception as e:
-            logging.error(f"buffer_inspect error: {e}", exc_info=True)
-            return {"success": False, "error": str(e), "tail_lines": 0, "data": []}
+            logging.error("serial_status error: %s", e, exc_info=True)
+            return {"success": False, "error": str(e)}
 
-    @mcp.tool()
-    async def serial_reconnect() -> dict:
-        """
-        Force a serial port reconnection attempt.
+    _register(serial_status)
 
-        Returns:
-            Dictionary with reconnection result
-        """
-        try:
-            logging.info("serial_reconnect called")
-            result = await asyncio.wait_for(asyncio.to_thread(serial_manager.reconnect), timeout=10.0)
+    # -- serial_read --
 
-            response = {"success": result["success"], "connected": result["connected"], "error": result.get("error")}
-            logging.info(f"serial_reconnect completed: success={result['success']}, connected={result['connected']}")
-            return response
-        except asyncio.TimeoutError:
-            logging.error("serial_reconnect timeout - serial manager hung")
-            return {
-                "success": False,
-                "connected": False,
-                "error": "Operation timed out - serial manager may be deadlocked",
-            }
-        except Exception as e:
-            logging.error(f"serial_reconnect error: {e}", exc_info=True)
-            return {"success": False, "connected": False, "error": str(e)}
-
-    @mcp.tool()
-    async def serial_write(data: str, add_newline: bool = True) -> dict:
-        """
-        Write data to the serial port.
+    async def serial_read(
+        device: str | None = None,
+        lines: int | None = None,
+        duration_seconds: float | None = None,
+        clear_after_read: bool = False,
+    ) -> dict:
+        """Read data from a device's serial buffer.
 
         Args:
-            data: Data to write to serial port
-            add_newline: Append newline character (default: true)
-
-        Returns:
-            Dictionary with write status and bytes written
+            device: Device name. Optional when only one device exists.
+            lines: Number of lines to read (None = all available).
+            duration_seconds: Read data received within last N seconds.
+            clear_after_read: Clear buffer after reading.
         """
-        logging.debug(f"serial_write entry data_len={len(data)}, add_newline={add_newline}")
         try:
-            # Decode escape sequences that arrive as literal strings from JSON-RPC
-            # (e.g. the LLM sends "\x03" as 4 chars, we need byte 0x03)
+            entry = _resolve_device(device)
+            buf = entry.buffer_manager
+            if buf is None:
+                return {"success": False, "error": f"Device '{entry.name}' has no buffer"}
+
+            if duration_seconds is not None:
+                cutoff_time = time.time() - duration_seconds
+                all_lines = await asyncio.wait_for(
+                    asyncio.to_thread(buf.read, lines=None, clear_after_read=False),
+                    timeout=10.0,
+                )
+                filtered = [line for line in all_lines if line.timestamp >= cutoff_time]
+                if clear_after_read:
+                    await asyncio.wait_for(asyncio.to_thread(buf.clear), timeout=2.0)
+                return {
+                    "success": True,
+                    "device": entry.name,
+                    "lines_read": len(filtered),
+                    "data": [line.to_dict() for line in filtered],
+                }
+            else:
+                read_lines = await asyncio.wait_for(
+                    asyncio.to_thread(buf.read, lines=lines, clear_after_read=clear_after_read),
+                    timeout=10.0,
+                )
+                return {
+                    "success": True,
+                    "device": entry.name,
+                    "lines_read": len(read_lines),
+                    "data": [line.to_dict() for line in read_lines],
+                }
+        except (DeviceNotFoundError, AmbiguousDeviceError) as e:
+            return {"success": False, "error": str(e)}
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "Operation timed out"}
+        except Exception as e:
+            logging.error("serial_read error: %s", e, exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    _register(serial_read)
+
+    # -- serial_write --
+
+    async def serial_write(data: str, device: str | None = None, add_newline: bool = True) -> dict:
+        """Write data to a device's serial port.
+
+        Args:
+            data: Data to write. Escape sequences (\\x03, \\n) are decoded.
+            device: Device name. Optional when only one device exists.
+            add_newline: Append newline character (default: true).
+        """
+        try:
+            entry = _resolve_device(device)
+            sm = entry.serial_manager
+            if sm is None:
+                return {"success": False, "error": f"Device '{entry.name}' not connected"}
+
             decoded_data = _decode_escapes(data)
-            logging.info(
-                f"serial_write called: data_len={len(data)}, decoded_len={len(decoded_data)}, add_newline={add_newline}"
-            )
             result = await asyncio.wait_for(
-                asyncio.to_thread(serial_manager.write, data=decoded_data, add_newline=add_newline), timeout=5.0
+                asyncio.to_thread(sm.write, data=decoded_data, add_newline=add_newline),
+                timeout=5.0,
             )
-
-            # Get current status for context
-            status = await asyncio.wait_for(asyncio.to_thread(serial_manager.get_status), timeout=2.0)
-
-            response = {
+            return {
                 "success": result["success"],
+                "device": entry.name,
                 "bytes_written": result["bytes_written"],
                 "error": result.get("error"),
-                "port_connected": status["connected"],
             }
-            logging.info(f"serial_write completed: success={result['success']}, bytes={result['bytes_written']}")
-            return response
+        except (DeviceNotFoundError, AmbiguousDeviceError) as e:
+            return {"success": False, "error": str(e)}
         except asyncio.TimeoutError:
-            logging.error("serial_write timeout - serial manager hung")
-            return {
-                "success": False,
-                "bytes_written": 0,
-                "error": "Operation timed out - serial manager may be deadlocked",
-                "port_connected": False,
-            }
+            return {"success": False, "error": "Operation timed out"}
         except Exception as e:
-            logging.error(f"serial_write error: {e}", exc_info=True)
-            return {"success": False, "bytes_written": 0, "error": str(e), "port_connected": False}
+            logging.error("serial_write error: %s", e, exc_info=True)
+            return {"success": False, "error": str(e)}
 
-    logging.info(
-        "Tools registered: server_shutdown, serial_read, serial_status, buffer_clear, buffer_inspect, serial_reconnect, serial_write"
-    )
+    _register(serial_write)
+
+    # -- buffer_inspect --
+
+    async def buffer_inspect(device: str | None = None, tail_lines: int = 50) -> dict:
+        """Inspect buffer contents without consuming data.
+
+        Args:
+            device: Device name. Optional when only one device exists.
+            tail_lines: Number of recent lines to show (default: 50).
+        """
+        try:
+            entry = _resolve_device(device)
+            buf = entry.buffer_manager
+            if buf is None:
+                return {"success": False, "error": f"Device '{entry.name}' has no buffer"}
+
+            stats = await asyncio.wait_for(asyncio.to_thread(buf.get_stats), timeout=2.0)
+            recent = await asyncio.wait_for(asyncio.to_thread(buf.read_tail, lines=tail_lines), timeout=5.0)
+
+            return {
+                "success": True,
+                "device": entry.name,
+                "statistics": stats,
+                "tail_lines": len(recent),
+                "data": [line.to_dict() for line in recent],
+            }
+        except (DeviceNotFoundError, AmbiguousDeviceError) as e:
+            return {"success": False, "error": str(e)}
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "Operation timed out"}
+        except Exception as e:
+            logging.error("buffer_inspect error: %s", e, exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    _register(buffer_inspect)
+
+    # -- buffer_clear --
+
+    async def buffer_clear(device: str | None = None) -> dict:
+        """Clear all buffered serial data for a device.
+
+        Args:
+            device: Device name. Optional when only one device exists.
+        """
+        try:
+            entry = _resolve_device(device)
+            buf = entry.buffer_manager
+            if buf is None:
+                return {"success": False, "error": f"Device '{entry.name}' has no buffer"}
+
+            lines_cleared = await asyncio.wait_for(asyncio.to_thread(buf.clear), timeout=5.0)
+            return {"success": True, "device": entry.name, "lines_cleared": lines_cleared}
+        except (DeviceNotFoundError, AmbiguousDeviceError) as e:
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            logging.error("buffer_clear error: %s", e, exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    _register(buffer_clear)
+
+    # -- serial_control --
+
+    async def serial_control(action: str, device: str | None = None) -> dict:
+        """Control a device's serial port connection.
+
+        Args:
+            action: "reconnect", "suspend", or "resume".
+                suspend releases the port for external tools (esptool).
+                resume re-acquires after external tool use. Background
+                scan will pick up any port path changes automatically.
+            device: Device name. Optional when only one device exists.
+        """
+        valid_actions = ("reconnect", "suspend", "resume")
+        if action not in valid_actions:
+            return {"success": False, "error": f"Unknown action '{action}'. Valid: {', '.join(valid_actions)}"}
+
+        try:
+            entry = _resolve_device(device)
+            sm = entry.serial_manager
+            if sm is None:
+                return {"success": False, "error": f"Device '{entry.name}' not connected"}
+
+            if action == "suspend":
+                result = await asyncio.wait_for(asyncio.to_thread(sm.suspend), timeout=10.0)
+            elif action == "resume":
+                result = await asyncio.wait_for(asyncio.to_thread(sm.resume), timeout=10.0)
+            else:
+                result = await asyncio.wait_for(asyncio.to_thread(sm.reconnect), timeout=10.0)
+
+            return {
+                "success": result["success"],
+                "device": entry.name,
+                "action": action,
+                "connected": result.get("connected", False),
+                "error": result.get("error"),
+            }
+        except (DeviceNotFoundError, AmbiguousDeviceError) as e:
+            return {"success": False, "error": str(e)}
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "Operation timed out"}
+        except Exception as e:
+            logging.error("serial_control error: %s", e, exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    _register(serial_control)
+
+    # -- server_shutdown --
+
+    async def server_shutdown() -> dict:
+        """Cooperative shutdown request."""
+        logging.info("server_shutdown tool invoked")
+        graceful_shutdown("tool server_shutdown")
+        asyncio.get_running_loop().call_soon(sys.exit, 0)
+        return {"success": True}
+
+    _register(server_shutdown)
+
+    # Log registered tools
+    registered = [
+        t
+        for t in [
+            "serial_status",
+            "serial_read",
+            "serial_write",
+            "buffer_inspect",
+            "buffer_clear",
+            "serial_control",
+            "server_shutdown",
+        ]
+        if cfg.is_tool_enabled(t)
+    ]
+    logging.info("Tools registered: %s", ", ".join(registered))
 
     return mcp
 
 
 def main():
     """Main entry point."""
-    parser = argparse.ArgumentParser(description="ttygeist")
-    parser.add_argument("--config", default="config.yaml", help="Path to configuration file (default: config.yaml)")
-    parser.add_argument("--transport", choices=["http", "stdio"], help="Override transport (http or stdio)")
+    parser = argparse.ArgumentParser(description="ttygeist - multi-device serial MCP server")
+    parser.add_argument("--config", default="config.yaml", help="Path to configuration file")
+    parser.add_argument("--transport", choices=["http", "stdio"], help="Override transport")
     args = parser.parse_args()
 
-    # Load configuration
-    cfg = Config(config_path=args.config)
-
-    # Setup logging
+    cfg = load_config(config_path=args.config)
     setup_logging(cfg)
 
     logging.info("=" * 60)
     logging.info("Starting ttygeist")
-    logging.info(f"Serial Port: {cfg.serial_port}")
-    logging.info(f"Baud Rate: {cfg.serial_baudrate}")
-    logging.info(f"Transport: {cfg.server_transport}")
-    if cfg.server_transport == "http":
-        logging.info(f"Server: https://{cfg.server_host}:{cfg.server_port}")
+    logging.info("Named devices: %d", len(cfg.devices))
+    logging.info("Block list: %s", cfg.block)
+    logging.info("Disabled tools: %s", cfg.disabled_tools or "(none)")
+    logging.info("Transport: %s", cfg.server_transport)
+    for name, dev in cfg.devices.items():
+        if dev.serial:
+            logging.info("  %s: serial=%s baud=%d", name, dev.serial, dev.baud)
+        elif dev.port:
+            logging.info("  %s: port=%s baud=%d", name, dev.port, dev.baud)
     logging.info("=" * 60)
 
-    # Resolve transport preference (CLI > env > config already applied for env)
-    transport_override = args.transport
-    transport = transport_override or cfg.server_transport
+    transport = args.transport or cfg.server_transport
     transport = transport.lower()
 
-    # Validate API keys / anon mode (HTTP only)
     if transport == "http":
         if not cfg.api_keys and not cfg.allow_anon:
-            logging.error("No API keys configured and anonymous access disabled. Server will not start.")
-            logging.error("Add keys to config file or set TTYGEIST_API_KEYS, or enable allow_anon for local dev.")
+            logging.error("No API keys and anonymous access disabled.")
             return
         if not cfg.api_keys and cfg.allow_anon:
-            logging.warning("Starting in anonymous mode (no auth middleware). Do NOT use in production.")
-        else:
-            logging.info(f"Configured with {len(cfg.api_keys)} API key(s)")
-    else:
-        logging.info("STDIO transport selected; HTTP auth settings ignored")
+            logging.warning("Anonymous mode enabled.")
 
-    # Create MCP server
     mcp = create_mcp_server(cfg)
 
     if transport == "stdio":
@@ -462,16 +475,15 @@ def main():
         try:
             mcp.run()
         except KeyboardInterrupt:
-            logging.info("Received shutdown signal (stdio)")
+            pass
         finally:
             graceful_shutdown("stdio exit")
         return
 
-    # HTTP path remains unchanged
+    # HTTP path
     mcp_app = mcp.http_app(path="/")
-
-    # Wrap with auth middleware unless anonymous mode.
     asgi_app = mcp_app
+
     if cfg.api_keys and not cfg.allow_anon:
         from ttygeist.auth import APIKeyAuthASGIMiddleware
 
@@ -480,32 +492,20 @@ def main():
             api_keys=cfg.api_keys,
             header_name=cfg.auth_header_name,
         )
-        logging.info(f"Auth middleware enabled using header '{cfg.auth_header_name}'")
-    else:
-        logging.info("Auth middleware disabled")
 
-    # Optional lightweight request logging
     if cfg.request_log_enabled and cfg.log_level.upper() == "DEBUG":
 
         async def request_logger(scope, receive, send):
             if scope.get("type") == "http":
-                logging.debug(f"HTTP {scope.get('method')} {scope.get('path')}")
+                logging.debug("HTTP %s %s", scope.get("method"), scope.get("path"))
             return await asgi_app(scope, receive, send)
 
         asgi_app = request_logger
-        logging.debug("Request logging middleware active")
 
     from starlette.applications import Starlette
     from starlette.routing import Mount
 
-    app = Starlette(
-        routes=[
-            Mount("/", app=asgi_app),
-        ],
-        lifespan=mcp_app.lifespan,
-    )
-
-    logging.info("HTTP server application assembled and mounted at /")
+    app = Starlette(routes=[Mount("/", app=asgi_app)], lifespan=mcp_app.lifespan)
 
     try:
         import uvicorn
@@ -519,7 +519,7 @@ def main():
             log_level=cfg.log_level.lower(),
         )
     except KeyboardInterrupt:
-        logging.info("Received shutdown signal")
+        pass
     finally:
         graceful_shutdown("http exit")
 
