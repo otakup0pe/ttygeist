@@ -481,7 +481,7 @@ def main():
         return
 
     # HTTP path
-    mcp_app = mcp.http_app(path="/")
+    mcp_app = mcp.http_app(path="/", stateless_http=True)
     asgi_app = mcp_app
 
     if cfg.api_keys and not cfg.allow_anon:
